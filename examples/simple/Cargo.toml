@@ -1,0 +1,12 @@
+[package]
+name = "simple"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+minfac = "0.1"
+pilatus = {git = "https://github.com/mineichen/pilatus.git", branch = "main", features=["tokio"]}
+pilatus-axum-rt = {git = "https://github.com/mineichen/pilatus.git", branch = "main", features=["engineering"]}
+pilatus-engineering = {git = "https://github.com/mineichen/pilatus.git", branch = "main", features = ["image-algorithm"]}
+pilatus-rt = {git = "https://github.com/mineichen/pilatus.git", branch = "main"}
+pilatus-aravis = { path = "../.." }
