@@ -241,6 +241,7 @@ mod tests {
     use image::Luma;
 
     #[tokio::test]
+    #[ignore = "requires hardware"]
     async fn it_works() -> anyhow::Result<()> {
         let mut collection = ServiceCollection::new();
         register_services(&mut collection);

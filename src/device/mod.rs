@@ -11,7 +11,6 @@ use tracing::debug;
 
 use crate::wrapper::CameraFactory;
 
-mod record;
 mod subscribe;
 
 const DEVICE_TYPE: &str = "pilatus-camera-aravis";
