@@ -121,16 +121,21 @@ impl CameraBuilder {
         let mut last = std::time::Instant::now();
         loop {
             trace!("Before pop_buffer");
+            if self.is_termination_requested.load(Ordering::Relaxed) {
+                break;
+            }
             let Some(mut buf) = stream.timeout_pop_buffer(5_100_000) else {
+                if let Ok(x) = camera.string("DeviceSerialNumber") {
+                    debug!("No images but still able to get serial number {x}. Avoid reconnect");
+                    continue;
+                }
                 return Err(anyhow!(
                     "A long time elapsed without images: {:?}",
                     last.elapsed()
                 ));
             };
             trace!("After pop_buffer");
-            if self.is_termination_requested.load(Ordering::Relaxed) {
-                break;
-            }
+
             let elapsed = last.elapsed();
             last = std::time::Instant::now();
             // let pilatus_image = convert_buf.try_into_pilatus_luma();
@@ -176,11 +181,7 @@ impl CameraBuilder {
                     );
                     // return existing buf caused deadlock
                     stream.push_buffer(buf);
-                    if recv_buffer.is_terminated() {
-                        break;
-                    } else {
-                        continue;
-                    }
+                    continue;
                 }
             }
 
