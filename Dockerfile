@@ -20,7 +20,7 @@ RUN pipx install ninja
 
 RUN git clone https://github.com/AravisProject/aravis.git && \
     cd aravis && \
-    git checkout ARAVIS_0_8_13 
+    git checkout 0.8.33 
 
 RUN cd aravis && meson setup build && meson configure build -Dviewer=disabled -Dusb=disabled -Dgst-plugin=disabled && meson compile -C build
 

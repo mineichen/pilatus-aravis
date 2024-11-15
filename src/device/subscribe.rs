@@ -28,9 +28,11 @@ impl super::State {
             .subscribe_broadcast()
             .await
             .map(|img| match img {
-                Ok(pilatus_engineering::image::DynamicImage::Luma8(img)) => {
-                    Some(BroadcastImage::with_hash(Arc::new(img), None))
-                }
+                Ok(ImageWithMeta {
+                    image: pilatus_engineering::image::DynamicImage::Luma8(img),
+                    meta,
+                    ..
+                }) => Some(BroadcastImage::with_hash(Arc::new(img), meta.hash)),
                 e => {
                     warn!("Camera produces images of a format which was not requested: {e:?}");
                     None
@@ -45,34 +47,26 @@ impl super::State {
         &mut self,
         _msg: SubscribeDynamicImageMessage,
     ) -> ActorResult<SubscribeDynamicImageMessage> {
-        Ok(self
-            .subscribe_broadcast()
-            .await
-            .then(|r| async move {
-                match r {
-                    Ok(x) => Ok(ImageWithMeta::with_hash(x, None)),
-                    Err(e) => Err(e.into()),
-                }
-            })
-            .boxed())
+        Ok(self.subscribe_broadcast().await.map_err(Into::into).boxed())
     }
 
     async fn subscribe_broadcast(
         &mut self,
-    ) -> impl Stream<Item = Result<DynamicImage, MissedItemsError>> {
+    ) -> impl Stream<Item = Result<ImageWithMeta<DynamicImage>, MissedItemsError>> {
         let mapper = |e| {
             let BroadcastStreamRecvError::Lagged(e) = e;
             MissedItemsError::new(Saturating(e.max(u16::MAX as _) as u16))
         };
         if let Some(stream) = self.running.take() {
             let r = stream.broadcast.subscribe();
-            // Continues running until stopped or no all receiver terminate
+            // Continues running until stopped or all receiver terminate
             // 1. Receiver was not stopped, as there was another receiver before. Otherwise shutdown anyway to make sure
             // 2. We did not actively shutdown stream
             if stream.broadcast.receiver_count() > 1 {
                 self.running = Some(stream);
                 return tokio_stream::wrappers::BroadcastStream::new(r).map_err(mapper);
             } else {
+                // Changes are, that the thread started terminating
                 stream.shutdown().await;
             }
         };
@@ -96,10 +90,16 @@ impl super::State {
                 let r = builder
                     .clone()
                     .with_termination(should_terminate_copy.clone())
-                    .build(|img: pilatus_engineering::image::DynamicImage| {
+                    .build(|img| {
                         sender
                             .send(img)
-                            .map(|_| StreamingAction::Continue)
+                            .map(|x| {
+                                if x > 0 {
+                                    StreamingAction::Continue
+                                } else {
+                                    StreamingAction::Stop
+                                }
+                            })
                             .unwrap_or(StreamingAction::Stop)
                     });
 
@@ -132,7 +132,7 @@ impl super::State {
 }
 
 pub(super) struct RunningState {
-    broadcast: broadcast::Sender<DynamicImage>,
+    broadcast: broadcast::Sender<ImageWithMeta<DynamicImage>>,
     thread_handle: std::thread::JoinHandle<()>,
     async_thread_termination: futures::channel::oneshot::Receiver<()>,
     should_terminate: Arc<AtomicBool>,

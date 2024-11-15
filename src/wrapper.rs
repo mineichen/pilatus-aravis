@@ -1,9 +1,9 @@
 use std::{
+    borrow::Cow,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::Duration,
 };
 
 use anyhow::anyhow;
@@ -13,9 +13,10 @@ use aravis::{
 };
 use futures::stream::FusedStream;
 use minfac::{Registered, ServiceCollection};
-use tracing::{debug, error, info, trace};
+use pilatus_engineering::image::{ImageKey, ImageMeta, ImageWithMeta};
+use tracing::{debug, info, trace};
 
-use crate::{genicam::GenicamFeatureCollection, ReturnableBuffer, ToPilatusImageExt};
+use crate::{buffer::ReturnableBuffer, genicam::GenicamFeatureCollection, ToPilatusImageExt};
 
 pub(super) fn register_services(c: &mut ServiceCollection) {
     c.register_shared(|| {
@@ -56,7 +57,7 @@ impl CameraFactory {
     #[cfg(test)]
     pub fn build(
         &self,
-        callback: impl FnMut(pilatus_engineering::image::DynamicImage) -> StreamingAction,
+        callback: impl FnMut(ImageWithMeta<pilatus_engineering::image::DynamicImage>) -> StreamingAction,
     ) -> anyhow::Result<StreamingAction> {
         CameraBuilder {
             camera_identifier: None,
@@ -78,15 +79,29 @@ impl CameraBuilder {
     }
     pub fn build(
         self,
-        mut callback: impl FnMut(pilatus_engineering::image::DynamicImage) -> StreamingAction,
+        mut callback: impl FnMut(
+            ImageWithMeta<pilatus_engineering::image::DynamicImage>,
+        ) -> StreamingAction,
     ) -> anyhow::Result<StreamingAction> {
         let mut camera = aravis::Camera::new(self.camera_identifier.as_deref())?;
-        let props = get_features(&camera)?.collect::<Vec<_>>();
+        let features = get_features(&camera)?.collect::<Vec<_>>();
+        // let (str, _size) = camera
+        //     .device()
+        //     .ok_or_else(|| anyhow!("Device not available"))?
+        //     .genicam_xml();
+        // std::fs::write("genicam.xml", str.as_bytes())?;
+        // let parser = camera
+        //     .create_chunk_parser()
+        //     .ok_or_else(|| anyhow!("Couldn't create chunk parser"))?;
+
+        // camera.set_chunk_state("Counter0Value", true)?;
+        // debug!("ChunkMode: {}", camera.chunk_mode()?);
+
         if self.is_termination_requested.load(Ordering::Relaxed) {
             return Ok(StreamingAction::Stop);
         }
 
-        info!("Create Camera with features {:?}", props);
+        info!("Create Camera with features {:?}", features);
         let num_features = self.features.apply(&mut camera)?;
 
         debug!("Camera is created with {num_features} features");
@@ -98,7 +113,7 @@ impl CameraBuilder {
         let (send_buf_back, mut recv_buffer) = futures::channel::mpsc::channel(10);
 
         for _ in 0..2 {
-            stream.push_buffer(Buffer::new_leaked_box(size as _));
+            stream.push_buffer(Buffer::new_allocate(size as _));
         }
 
         camera.start_acquisition()?;
@@ -107,7 +122,6 @@ impl CameraBuilder {
         loop {
             trace!("Before pop_buffer");
             let Some(mut buf) = stream.timeout_pop_buffer(5_100_000) else {
-                drop(stream);
                 return Err(anyhow!(
                     "A long time elapsed without images: {:?}",
                     last.elapsed()
@@ -119,13 +133,12 @@ impl CameraBuilder {
             }
             let elapsed = last.elapsed();
             last = std::time::Instant::now();
-            if elapsed > Duration::from_secs(5) {}
             // let pilatus_image = convert_buf.try_into_pilatus_luma();
             // stream.push_buffer(&buf);
             if buf.status() != BufferStatus::Success {
                 debug!("{elapsed:?} invalid buffer received: {:?}", buf.status());
                 // returning existing buffer caused segfault
-                //stream.push_buffer(Buffer::new_leaked_box(size as _));
+                // stream.push_buffer(Buffer::new_leaked_box(size as _));
                 stream.push_buffer(buf);
 
                 if recv_buffer.is_terminated() {
@@ -135,33 +148,86 @@ impl CameraBuilder {
                     continue;
                 }
             }
-            if !matches!(
-                buf.payload_type(),
-                BufferPayloadType::Image | BufferPayloadType::Unknown
-            ) {
-                trace!(
-                    "{elapsed:?} unexpected payload: {:?} of size {}",
-                    buf.payload_type(),
-                    buf.data().1
-                );
-                // return existing buf caused deadlock
-                stream.push_buffer(buf);
-                if recv_buffer.is_terminated() {
-                    break;
-                } else {
-                    continue;
+            match buf.payload_type() {
+                BufferPayloadType::Image | BufferPayloadType::Unknown => {
+                    // match parser.string_value(&buf, "Counter0Value") {
+                    //     Ok(o) => debug!("Found int value: {o}"),
+                    //     Err(e) => error!("Counter not available: {e:?}"),
+                    // }
+
+                    //debug!("ChunkData: {:?}", buf.chunk_data(0))
+                }
+                // BufferPayloadType::ChunkData => {
+                //     // for x in 0..100 {
+                //     //     let data = buf.chunk_data(x);
+                //     //     if data.is_empty() {
+                //     //         break;
+                //     //     }
+                //     //     debug!("Got chunk {x} of len {}: {:?}", data.len(), &data[0..10]);
+                //     // }
+                //     debug!("Got Chunk, which was discarded");
+                //     stream.push_buffer(buf);
+                //     continue;
+                // }
+                t => {
+                    trace!(
+                        "{elapsed:?} unexpected payload: {t:?} of size {}",
+                        buf.data().1
+                    );
+                    // return existing buf caused deadlock
+                    stream.push_buffer(buf);
+                    if recv_buffer.is_terminated() {
+                        break;
+                    } else {
+                        continue;
+                    }
                 }
             }
-            let pixel_format = buf.image_pixel_format();
 
             let mut convert_buf = match recv_buffer.try_next() {
                 Ok(Some(b)) => b,
-                _ => Box::new(ReturnableBuffer::new(
-                    Buffer::new_allocate(size as _),
-                    send_buf_back.clone(),
-                )),
+                _ => {
+                    info!("No buffer in pool. Allocate new");
+                    Box::new(ReturnableBuffer::new(
+                        Buffer::new_allocate(size as _),
+                        send_buf_back.clone(),
+                    ))
+                }
             };
             convert_buf.swap_buf(&mut buf);
+            stream.push_buffer(buf);
+
+            let image_buf = convert_buf.buffer();
+            let part_len = image_buf.n_parts();
+            anyhow::ensure!(part_len > 0, "Expected at least one image part");
+
+            // Collect others into vecs, use the buffer only for main-image for now (to be optimized)
+            let others = (1..image_buf.n_parts())
+                .map(|part_id| {
+                    // Todo: Get From params
+                    let key = ImageKey::try_from(Cow::Owned(format!("test_{part_id}"))).unwrap();
+                    let pixel_format = image_buf.part_pixel_format(part_id);
+                    let image = match pixel_format.raw() {
+                        aravis_sys::ARV_PIXEL_FORMAT_MONO_8 => (part_id, image_buf)
+                            .try_into_pilatus()
+                            .map(pilatus_engineering::image::DynamicImage::Luma8),
+
+                        aravis_sys::ARV_PIXEL_FORMAT_MONO_16 | crate::PIXELFORMAT_COORD3D_C16 => {
+                            (part_id, image_buf)
+                                .try_into_pilatus()
+                                .map(pilatus_engineering::image::DynamicImage::Luma16)
+                        }
+
+                        _ => Err(crate::ToPilatusImageError::InvalidPixelType {
+                            format: pixel_format,
+                            details: "Unknown bit dept".into(),
+                        }),
+                    };
+                    (key, image)
+                })
+                .collect::<Vec<_>>();
+
+            let pixel_format = convert_buf.buffer().image_pixel_format();
             trace!("{elapsed:?} {pixel_format:?}");
 
             let pilatus_image = match pixel_format.raw() {
@@ -175,9 +241,12 @@ impl CameraBuilder {
                         .map(pilatus_engineering::image::DynamicImage::Luma16)
                 }
 
-                e => {
-                    error!("Can't handle pixel format {e:?}");
-                    break;
+                _ => {
+                    return Err(crate::ToPilatusImageError::InvalidPixelType {
+                        format: pixel_format,
+                        details: "Unknown bit dept".into(),
+                    }
+                    .into())
                 }
             }; /*
                if let Ok(x) = pilatus_image.as_ref() {
@@ -220,9 +289,18 @@ impl CameraBuilder {
 
             // let pilatus_image =
             //     anyhow::Ok(LumaImage::new(vec, width.try_into()?, height.try_into()?));
-            stream.push_buffer(buf);
 
-            match (callback)(pilatus_image?) {
+            let mut result = ImageWithMeta::with_meta_and_others(
+                pilatus_image?,
+                ImageMeta { hash: None },
+                Default::default(),
+            );
+
+            for (k, v) in others {
+                result.insert(k, v?);
+            }
+
+            match (callback)(result) {
                 StreamingAction::Continue => {}
                 StreamingAction::Stop => return Ok(StreamingAction::Stop),
             }
@@ -268,8 +346,13 @@ mod tests {
         tokio::fs::create_dir_all(path).await?;
         let mut consumer_joins = Vec::new();
         let mut stream = receiver.enumerate();
-        while let Some((i, pilatus_engineering::image::DynamicImage::Luma8(img))) =
-            stream.next().await
+        while let Some((
+            i,
+            ImageWithMeta {
+                image: pilatus_engineering::image::DynamicImage::Luma8(img),
+                ..
+            },
+        )) = stream.next().await
         {
             consumer_joins.push(std::thread::spawn(move || {
                 let (width, height) = img.dimensions();

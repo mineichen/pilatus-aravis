@@ -1,6 +1,7 @@
 use aravis_sys::ArvPixelFormat;
 use minfac::ServiceCollection;
 
+mod buffer;
 mod device;
 mod genicam;
 mod image_ext;
