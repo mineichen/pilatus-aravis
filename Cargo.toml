@@ -15,6 +15,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 minfac = "0.1.0"
 pilatus = { git = "https://github.com/mineichen/pilatus.git", branch = "main", features = ["tokio"] }
 pilatus-engineering = { git = "https://github.com/mineichen/pilatus.git", branch = "main" }
+pilatus-engineering-rt = { git = "https://github.com/mineichen/pilatus.git", branch = "main" }
 #pilatus = { path = "../pilatus/pilatus", features=["tokio"] }
 #pilatus-engineering = { path = "../pilatus/pilatus-engineering" }
 serde = { "version" = "1", features = ["derive"] }

@@ -10,7 +10,7 @@ use pilatus_rt::Runtime;
 
 fn main() {
     Runtime::default()
-        .register(pilatus_engineering::register)
+        .register(pilatus_engineering_rt::register)
         .register(pilatus_axum_rt::register)
         .register(pilatus_aravis::register)
         .register(register)
