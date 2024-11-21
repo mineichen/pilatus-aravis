@@ -20,12 +20,12 @@ use tracing::{debug, warn};
 use crate::wrapper::StreamingAction;
 
 impl super::State {
-    pub(super) async fn subscribe(
+    pub(super) async fn acquire(
         &mut self,
         _msg: SubscribeImageMessage,
     ) -> ActorResult<SubscribeImageMessage> {
         Ok(self
-            .subscribe_broadcast()
+            .acquire_broadcast()
             .await
             .map(|img| match img {
                 Ok(ImageWithMeta {
@@ -43,27 +43,27 @@ impl super::State {
             .boxed())
     }
 
-    pub(super) async fn subscribe_dynamic(
+    pub(super) async fn acquire_dynamic(
         &mut self,
         _msg: SubscribeDynamicImageMessage,
     ) -> ActorResult<SubscribeDynamicImageMessage> {
-        Ok(self.subscribe_broadcast().await.map_err(Into::into).boxed())
+        Ok(self.acquire_broadcast().await.map_err(Into::into).boxed())
     }
 
-    async fn subscribe_broadcast(
+    async fn acquire_broadcast(
         &mut self,
     ) -> impl Stream<Item = Result<ImageWithMeta<DynamicImage>, MissedItemsError>> {
         let mapper = |e| {
             let BroadcastStreamRecvError::Lagged(e) = e;
             MissedItemsError::new(Saturating(e.max(u16::MAX as _) as u16))
         };
-        if let Some(stream) = self.running.take() {
+        if let Some(stream) = self.acquisition.take() {
             let r = stream.broadcast.subscribe();
             // Continues running until stopped or all receiver terminate
             // 1. Receiver was not stopped, as there was another receiver before. Otherwise shutdown anyway to make sure
             // 2. We did not actively shutdown stream
             if stream.broadcast.receiver_count() > 1 {
-                self.running = Some(stream);
+                self.acquisition = Some(stream);
                 return tokio_stream::wrappers::BroadcastStream::new(r).map_err(mapper);
             } else {
                 // Changes are, that the thread started terminating
@@ -82,50 +82,60 @@ impl super::State {
         let should_terminate_copy = should_terminate.clone();
         let (async_term_send, async_thread_termination) = futures::channel::oneshot::channel();
 
-        self.running = Some(RunningState {
+        let state_sender = self.state.clone();
+        self.acquisition = Some(RunningState {
             should_terminate,
             broadcast,
             async_thread_termination,
-            thread_handle: std::thread::spawn(move || loop {
-                let r = builder
-                    .clone()
-                    .with_termination(should_terminate_copy.clone())
-                    .build(|img| {
-                        sender
-                            .send(img)
-                            .map(|x| {
-                                if x > 0 {
-                                    StreamingAction::Continue
-                                } else {
-                                    StreamingAction::Stop
-                                }
-                            })
-                            .unwrap_or(StreamingAction::Stop)
-                    });
+            thread_handle: std::thread::spawn(move || {
+                loop {
+                    let r = builder
+                        .clone()
+                        .with_termination(should_terminate_copy.clone())
+                        .build(|img| {
+                            sender
+                                .send(img)
+                                .map(|x| {
+                                    if x > 0 {
+                                        state_sender.publish_if_changed(
+                                            crate::device::state::RunningState::Running,
+                                        );
+                                        StreamingAction::Continue
+                                    } else {
+                                        StreamingAction::Stop
+                                    }
+                                })
+                                .unwrap_or(StreamingAction::Stop)
+                        });
 
-                match r {
-                    Ok(StreamingAction::Stop) => {
-                        debug!("Camera finished streaming");
-                        drop(async_term_send);
-                        break;
-                    }
-                    Ok(StreamingAction::Continue) => {}
-                    Err(e) => {
-                        debug!("Error during acquisition: {e:?}");
-                        if should_terminate_copy.load(Ordering::Relaxed) {
+                    match r {
+                        Ok(StreamingAction::Stop) => {
+                            debug!("Camera finished streaming");
+                            drop(async_term_send);
                             break;
-                        } else {
-                            std::thread::sleep(Duration::from_secs(1))
+                        }
+                        Ok(StreamingAction::Continue) => {}
+                        Err(e) => {
+                            debug!("Error during acquisition: {e:?}");
+
+                            if should_terminate_copy.load(Ordering::Relaxed) {
+                                break;
+                            } else {
+                                state_sender
+                                    .publish_if_changed(crate::device::state::RunningState::Error);
+                                std::thread::sleep(Duration::from_secs(1))
+                            }
                         }
                     }
                 }
+                state_sender.publish_if_changed(crate::device::state::RunningState::NotConnected);
             }),
         });
         tokio_stream::wrappers::BroadcastStream::new(receiver).map_err(mapper)
     }
 
-    pub async fn stop_streaming(&mut self) {
-        if let Some(s) = self.running.take() {
+    pub async fn stop_acquisition(&mut self) {
+        if let Some(s) = self.acquisition.take() {
             s.shutdown().await
         }
     }

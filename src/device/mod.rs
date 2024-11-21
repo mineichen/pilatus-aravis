@@ -11,7 +11,10 @@ use tracing::debug;
 
 use crate::wrapper::CameraFactory;
 
-mod subscribe;
+mod acquisition;
+mod state;
+
+pub use state::{RunningState, SubscribeRunningStateMessage};
 
 const DEVICE_TYPE: &str = "pilatus-camera-aravis";
 
@@ -24,7 +27,8 @@ pub struct Params {
 
 struct State {
     params: Params,
-    running: Option<subscribe::RunningState>,
+    acquisition: Option<acquisition::RunningState>,
+    state: state::State,
     factory: CameraFactory,
 }
 
@@ -49,8 +53,9 @@ async fn device(
     let actor = actor_system
         .register(ctx.id)
         .add_handler(State::update_params)
-        .add_handler(State::subscribe_dynamic)
-        .add_handler(State::subscribe);
+        .add_handler(State::acquire_dynamic)
+        .add_handler(State::acquire)
+        .add_handler(State::subscribe_state);
 
     let list_factory = factory.clone();
     tokio::task::spawn_blocking(move || debug!("Devicelist: {:?}", list_factory.get_device_list()))
@@ -59,11 +64,12 @@ async fn device(
     let mut state = actor
         .execute(State {
             params,
-            running: Default::default(),
+            acquisition: Default::default(),
+            state: Default::default(),
             factory,
         })
         .await;
-    state.stop_streaming().await;
+    state.stop_acquisition().await;
 
     Ok(())
 }

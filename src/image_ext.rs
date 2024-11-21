@@ -1,7 +1,4 @@
-use std::{
-    num::{NonZero, NonZeroU32},
-    sync::Arc,
-};
+use std::{num::NonZeroU32, sync::Arc};
 
 use aravis::{BufferPayloadType, PixelFormat};
 use bytemuck::{pod_collect_to_vec, AnyBitPattern, NoUninit};
