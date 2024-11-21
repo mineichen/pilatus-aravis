@@ -12,7 +12,7 @@ fn main() {
     Runtime::default()
         .register(pilatus_engineering_rt::register)
         .register(pilatus_axum_rt::register)
-        .register(pilatus_aravis::register)
+        .register(pilatus_aravis_rt::register)
         .register(register)
         .run();
 }
@@ -20,7 +20,7 @@ fn main() {
 extern "C" fn register(c: &mut ServiceCollection) {
     c.register(|| {
         pilatus::InitRecipeListener::new(|r| {
-            r.add_device(pilatus_aravis::create_default_camera_config());
+            r.add_device(pilatus_aravis_rt::create_default_camera_config());
         })
     });
     c.with::<Registered<ActorSystem>>()
@@ -28,7 +28,7 @@ extern "C" fn register(c: &mut ServiceCollection) {
             tokio::time::sleep(Duration::from_millis(10)).await;
             let mut state_stream = std::pin::pin!(
                 s.get_sender_or_single_handler(None)?
-                    .ask(pilatus_aravis::SubscribeRunningStateMessage::default())
+                    .ask(pilatus_aravis_rt::SubscribeRunningStateMessage::default())
                     .await?
             );
             while let Some(s) = state_stream.next().await {

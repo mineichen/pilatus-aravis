@@ -10,6 +10,6 @@ pilatus = { git = "https://github.com/mineichen/pilatus.git", branch = "main", f
 pilatus-axum-rt = { git = "https://github.com/mineichen/pilatus.git", branch = "main", features = ["engineering"] }
 pilatus-engineering-rt = { git = "https://github.com/mineichen/pilatus.git", branch = "main" }
 pilatus-rt = { git = "https://github.com/mineichen/pilatus.git", branch = "main" }
-pilatus-aravis = { path = "../.." }
+pilatus-aravis-rt = { path = "../.." }
 tracing = "0.1"
 tokio = { version = "1" }
