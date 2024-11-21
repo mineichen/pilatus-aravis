@@ -1,29 +1,16 @@
-[package]
-name = "pilatus-aravis-rt"
-version = "0.1.0"
-edition = "2021"
+[workspace]
+resolver = "2"
 
-[dependencies]
-aravis-sys = "0.10"
-aravis = { version = "0.11", features = ["v0_8_31"] }
-#aravis = { path = "../../aravis-rs/aravis" }
-#aravis-sys = { path = "../../aravis-rs/aravis-sys" }
-anyhow = "1"
-bytemuck = "1.19.0"
-futures = "0.3"
-image = { version = "0.25", default-features = false, features = ["png"] }
-minfac = "0.1.0"
-pilatus = { git = "https://github.com/mineichen/pilatus.git", branch = "main", features = ["tokio"] }
-pilatus-engineering = { git = "https://github.com/mineichen/pilatus.git", branch = "main" }
-pilatus-engineering-rt = { git = "https://github.com/mineichen/pilatus.git", branch = "main" }
-#pilatus = { path = "../pilatus/pilatus", features=["tokio"] }
-#pilatus-engineering = { path = "../pilatus/pilatus-engineering" }
-serde = { "version" = "1", features = ["derive"] }
-thiserror = "2"
-tokio = { "version" = "1", "features" = ["sync", "macros"] }
-tokio-stream = { "version" = "0.1", "features" = ["sync"] }
-tracing = "0.1"
+members = [
+  "examples/*",
+  "pilatus-aravis",
+  "pilatus-aravis-rt",
+]
 
-[dev-dependencies]
-tokio = { "version" = "1", "features" = ["sync", "macros", "fs"] }
-serde_json = "1"
+#[patch."https://github.com/mineichen/pilatus.git"]
+#pilatus =  { path = "../pilatus/pilatus" }
+#pilatus-rt =  { path = "../pilatus/pilatus-rt" }
+#pilatus-axum =  { path = "../pilatus/pilatus-axum" }
+#pilatus-axum-rt =  { path = "../pilatus/pilatus-axum-rt" }
+#pilatus-engineering =  { path = "../pilatus/pilatus-engineering" }
+#pilatus-engineering-camera-rt = { path = "../pilatus/pilatus-engineering-camera-rt" }

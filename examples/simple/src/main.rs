@@ -28,7 +28,7 @@ extern "C" fn register(c: &mut ServiceCollection) {
             tokio::time::sleep(Duration::from_millis(10)).await;
             let mut state_stream = std::pin::pin!(
                 s.get_sender_or_single_handler(None)?
-                    .ask(pilatus_aravis_rt::SubscribeRunningStateMessage::default())
+                    .ask(pilatus_aravis::SubscribeRunningStateMessage::default())
                     .await?
             );
             while let Some(s) = state_stream.next().await {

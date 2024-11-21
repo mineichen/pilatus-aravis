@@ -14,8 +14,6 @@ use crate::wrapper::CameraFactory;
 mod acquisition;
 mod state;
 
-pub use state::{RunningState, SubscribeRunningStateMessage};
-
 const DEVICE_TYPE: &str = "pilatus-camera-aravis";
 
 #[derive(Debug, Deserialize, Serialize, Default)]

@@ -98,7 +98,7 @@ impl super::State {
                                 .map(|x| {
                                     if x > 0 {
                                         state_sender.publish_if_changed(
-                                            crate::device::state::RunningState::Running,
+                                            pilatus_aravis::RunningState::Running,
                                         );
                                         StreamingAction::Continue
                                     } else {
@@ -122,13 +122,13 @@ impl super::State {
                                 break;
                             } else {
                                 state_sender
-                                    .publish_if_changed(crate::device::state::RunningState::Error);
+                                    .publish_if_changed(pilatus_aravis::RunningState::Error);
                                 std::thread::sleep(Duration::from_secs(1))
                             }
                         }
                     }
                 }
-                state_sender.publish_if_changed(crate::device::state::RunningState::NotConnected);
+                state_sender.publish_if_changed(pilatus_aravis::RunningState::NotConnected);
             }),
         });
         tokio_stream::wrappers::BroadcastStream::new(receiver).map_err(mapper)

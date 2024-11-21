@@ -1,40 +1,15 @@
-use std::{
-    num::Saturating,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
-
-use futures::{Stream, StreamExt, TryStreamExt};
-use pilatus::{device::ActorResult, MissedItemsError, SubscribeMessage};
-use pilatus_engineering::image::{
-    BroadcastImage, DynamicImage, ImageWithMeta, SubscribeDynamicImageMessage,
-    SubscribeImageMessage,
-};
+use futures::StreamExt;
+use pilatus::device::ActorResult;
+use pilatus_aravis::{RunningState, SubscribeRunningStateMessage};
 use tokio::sync::watch;
-use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
-use tracing::{debug, warn};
-
-use crate::wrapper::StreamingAction;
-
-pub type SubscribeRunningStateMessage = SubscribeMessage<(), RunningState, ()>;
 
 impl super::State {
     pub(super) async fn subscribe_state(
         &mut self,
-        msg: SubscribeRunningStateMessage,
+        _msg: SubscribeRunningStateMessage,
     ) -> ActorResult<SubscribeRunningStateMessage> {
         Ok(tokio_stream::wrappers::WatchStream::new(self.state.watch.subscribe()).boxed())
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RunningState {
-    NotConnected,
-    Error,
-    Running,
 }
 
 #[derive(Clone)]
