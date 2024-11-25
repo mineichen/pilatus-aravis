@@ -15,5 +15,3 @@ pub extern "C" fn register(c: &mut ServiceCollection) {
 }
 
 pub use device::create_default_camera_config;
-
-const PIXELFORMAT_COORD3D_C16: ArvPixelFormat = 17825976;

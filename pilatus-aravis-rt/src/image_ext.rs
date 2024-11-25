@@ -1,8 +1,8 @@
 use std::{num::NonZeroU32, sync::Arc};
 
-use aravis::{BufferPayloadType, PixelFormat};
-use bytemuck::{pod_collect_to_vec, AnyBitPattern, NoUninit};
-use pilatus_engineering::image::{GenericImage, ImageVtable};
+use aravis::{glib::translate::ToGlibPtr, BufferPayloadType};
+use pilatus_engineering::image::{DynamicImage, GenericImage, ImageVtable};
+use tracing::debug;
 
 use crate::buffer::ReturnableBuffer;
 
@@ -10,17 +10,14 @@ use crate::buffer::ReturnableBuffer;
 pub enum ToPilatusImageError {
     #[error("The provided Buffer is not an image")]
     NotAnImage,
-    #[error("Unsupported PixelType {format:?}: {details}")]
-    InvalidPixelType {
-        format: aravis::PixelFormat,
-        details: String,
-    },
+    #[error("Unsupported PixelType: {details}")]
+    InvalidPixelType { details: String },
     #[error("Conversion failed: width {width}, height: {height}")]
     InvalidSize { width: u32, height: u32 },
 }
 
 pub(crate) trait ToPilatusImageExt {
-    fn try_into_pilatus<T: AnyBitPattern + NoUninit, const CHANNELS: usize>(
+    fn try_into_pilatus<T: Clone, const CHANNELS: usize>(
         self,
     ) -> Result<GenericImage<T, CHANNELS>, ToPilatusImageError>;
 }
@@ -57,84 +54,120 @@ impl<T: 'static + Clone, const CHANNELS: usize> Factory<T, CHANNELS> for Box<Ret
             clone: clone_arc,
         }
     };
+} /*
+
+  impl ToPilatusImageExt for Box<ReturnableBuffer> {
+      fn try_into_pilatus<T: AnyBitPattern + NoUninit, const CHANNELS: usize>(
+          self,
+      ) -> Result<GenericImage<T, CHANNELS>, ToPilatusImageError> {
+          let buffer = self.buffer();
+          if !matches!(
+              buffer.payload_type(),
+              BufferPayloadType::Image | BufferPayloadType::Multipart
+          ) {
+              return Err(ToPilatusImageError::NotAnImage);
+          }
+          let (buf, len) = buffer.data();
+          let buf = buf as *const T;
+
+          let width = buffer.image_width() as u32;
+          let height = buffer.image_height() as u32;
+
+          let (non_zero_width, non_zero_height) =
+              check_dimensions::<T>(buffer.image_pixel_format(), width, height, len)?;
+
+          let boxed = Box::into_raw(self) as usize;
+          Ok(unsafe {
+              GenericImage::<T, CHANNELS>::new_with_vtable(
+                  buf,
+                  non_zero_width,
+                  non_zero_height,
+                  <Self as Factory<T, CHANNELS>>::VTABLE,
+                  boxed,
+              )
+          })
+      }
+  }
+  */
+
+pub(crate) fn try_into_dynamic_pilatus_image(
+    part_id: u32,
+    buffer: Box<ReturnableBuffer>,
+) -> Result<DynamicImage, ToPilatusImageError> {
+    let image_buf = buffer.buffer();
+    let width = image_buf.part_width(part_id);
+    let height = image_buf.part_height(part_id);
+    let area = width as usize * height as usize;
+    let (_, buffer_size) = part_data(&image_buf, part_id);
+    let byte_dept = buffer_size / area;
+    debug!("Rest size: {}", buffer_size - area * byte_dept);
+
+    match byte_dept {
+        1 => (part_id, buffer)
+            .try_into_pilatus()
+            .map(pilatus_engineering::image::DynamicImage::Luma8),
+        2 => (part_id, buffer)
+            .try_into_pilatus()
+            .map(pilatus_engineering::image::DynamicImage::Luma16),
+        _ => Err(crate::ToPilatusImageError::InvalidPixelType {
+            details: format!(
+                "Unknown bit dept of PixelFormat {:?}. Area {area}, BufferSize: {buffer_size}",
+                image_buf.part_pixel_format(part_id)
+            ),
+        }),
+    }
 }
 
-impl ToPilatusImageExt for Box<ReturnableBuffer> {
-    fn try_into_pilatus<T: AnyBitPattern + NoUninit, const CHANNELS: usize>(
+/// Buffer should be reusable without reallocation to vec
+impl<'a> ToPilatusImageExt for (u32, Box<ReturnableBuffer>) {
+    fn try_into_pilatus<T: Clone, const CHANNELS: usize>(
         self,
     ) -> Result<GenericImage<T, CHANNELS>, ToPilatusImageError> {
-        let buffer = self.buffer();
-        if buffer.payload_type() != BufferPayloadType::Image {
+        let (idx, returnable_buffer) = self;
+        let buffer = returnable_buffer.buffer();
+        debug!(
+            "Kind: {:?}, Component_ID: {}",
+            buffer.part_data_type(idx),
+            buffer.part_component_id(idx)
+        );
+        if !matches!(
+            buffer.payload_type(),
+            BufferPayloadType::Image | BufferPayloadType::Multipart
+        ) {
             return Err(ToPilatusImageError::NotAnImage);
         }
-        let (buf, len) = buffer.data();
-        let buf = buf as *const T;
+        let (x, len) = part_data(&buffer, idx);
+        let width = buffer.part_width(idx) as u32;
+        let height = buffer.part_height(idx) as u32;
 
-        let width = buffer.image_width() as u32;
-        let height = buffer.image_height() as u32;
-
-        let (non_zero_width, non_zero_height) =
-            check_dimensions::<T>(buffer.image_pixel_format(), width, height, len)?;
-
-        let boxed = Box::into_raw(self) as usize;
+        assert!((x as *mut T).is_aligned());
+        let (non_zero_width, non_zero_height) = check_dimensions::<T>(width, height, len)?;
+        let boxed = Box::into_raw(returnable_buffer) as usize;
         Ok(unsafe {
             GenericImage::<T, CHANNELS>::new_with_vtable(
-                buf,
+                x as _,
                 non_zero_width,
                 non_zero_height,
-                <Self as Factory<T, CHANNELS>>::VTABLE,
+                <Box<ReturnableBuffer> as Factory<T, CHANNELS>>::VTABLE,
                 boxed,
             )
         })
     }
 }
 
-/// Buffer should be reusable without reallocation to vec
-impl<'a> ToPilatusImageExt for (u32, &'a aravis::Buffer) {
-    fn try_into_pilatus<T: AnyBitPattern + NoUninit, const CHANNELS: usize>(
-        self,
-    ) -> Result<GenericImage<T, CHANNELS>, ToPilatusImageError> {
-        let (idx, buffer) = self;
-        if buffer.payload_type() != BufferPayloadType::Image {
-            return Err(ToPilatusImageError::NotAnImage);
-        }
-
-        let pixel_buffer_typed: Vec<T> = bytemuck::try_cast_vec::<_, T>(buffer.part_data(idx))
-            .unwrap_or_else(|(_, original)| pod_collect_to_vec(&original));
-        let len = pixel_buffer_typed.len();
-
-        let width = buffer.part_width(idx) as u32;
-        let height = buffer.part_height(idx) as u32;
-
-        let (non_zero_width, non_zero_height) =
-            check_dimensions::<T>(buffer.part_pixel_format(idx), width, height, len)?;
-
-        Ok(GenericImage::<T, CHANNELS>::new_vec(
-            pixel_buffer_typed,
-            non_zero_width,
-            non_zero_height,
-        ))
-    }
-}
-
 fn check_dimensions<T>(
-    pixel_format: PixelFormat,
     width: u32,
     height: u32,
     buf_size: usize,
 ) -> Result<(NonZeroU32, NonZeroU32), ToPilatusImageError> {
     let area = height as usize * width as usize;
     let pixel_size = buf_size / area;
-    let remainer = buf_size % area;
 
-    if remainer != 0 || pixel_size != std::mem::size_of::<T>() {
+    if pixel_size != std::mem::size_of::<T>() {
         return Err(ToPilatusImageError::InvalidPixelType {
-            format: pixel_format,
             details: {
-                let area = area;
-                let buffer_size = buf_size;
                 let expected_dept = std::mem::size_of::<T>();
-                format!("Expected {expected_dept} bit deep (area: {area}, size: {buffer_size})")
+                format!("Expected {expected_dept} byte deep (area: {area}, size: {buf_size})")
             },
         });
     }
@@ -144,4 +177,16 @@ fn check_dimensions<T>(
     let non_zero_height = NonZeroU32::try_from(height)
         .map_err(|_| ToPilatusImageError::InvalidSize { width, height })?;
     Ok((non_zero_width, non_zero_height))
+}
+
+pub fn part_data(buf: &aravis::Buffer, part_id: u32) -> (*mut u8, usize) {
+    unsafe {
+        let mut size = 0usize;
+        let data = aravis_sys::arv_buffer_get_part_data(
+            buf.to_glib_none().0,
+            part_id,
+            &mut size as *mut usize,
+        );
+        (data, size)
+    }
 }

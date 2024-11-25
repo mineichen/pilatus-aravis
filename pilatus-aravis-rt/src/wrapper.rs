@@ -1,22 +1,25 @@
 use std::{
     borrow::Cow,
+    collections::HashMap,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
 };
 
-use anyhow::anyhow;
+use anyhow::{anyhow, Context};
 use aravis::{
-    AcquisitionMode, Aravis, Buffer, BufferPayloadType, BufferStatus, CameraExt, CameraExtManual,
-    StreamExt,
+    AcquisitionMode, Aravis, Buffer, BufferPartDataType, BufferPayloadType, BufferStatus,
+    CameraExt, CameraExtManual, StreamExt,
 };
 use futures::stream::FusedStream;
 use minfac::{Registered, ServiceCollection};
-use pilatus_engineering::image::{ImageKey, ImageMeta, ImageWithMeta};
-use tracing::{debug, info, trace};
+use pilatus_engineering::image::{ImageMeta, ImageWithMeta, SpecificImageKey};
+use tracing::{debug, info, trace, warn};
 
-use crate::{buffer::ReturnableBuffer, genicam::GenicamFeatureCollection, ToPilatusImageExt};
+use crate::{
+    buffer::ReturnableBuffer, genicam::GenicamFeatureCollection, try_into_dynamic_pilatus_image,
+};
 
 pub(super) fn register_services(c: &mut ServiceCollection) {
     c.register_shared(|| {
@@ -85,10 +88,11 @@ impl CameraBuilder {
     ) -> anyhow::Result<StreamingAction> {
         let mut camera = aravis::Camera::new(self.camera_identifier.as_deref())?;
         let features = get_features(&camera)?.collect::<Vec<_>>();
-        // let (str, _size) = camera
-        //     .device()
-        //     .ok_or_else(|| anyhow!("Device not available"))?
-        //     .genicam_xml();
+        // let (str, _size) = aravis::DeviceExt::genicam_xml(
+        //     &camera
+        //         .device()
+        //         .ok_or_else(|| anyhow!("Device not available"))?,
+        // );
         // std::fs::write("genicam.xml", str.as_bytes())?;
         // let parser = camera
         //     .create_chunk_parser()
@@ -100,6 +104,16 @@ impl CameraBuilder {
         if self.is_termination_requested.load(Ordering::Relaxed) {
             return Ok(StreamingAction::Stop);
         }
+        // camera.set_access_check_policy(aravis::AccessCheckPolicy::Disable);
+        // camera.set_register_cache_policy(aravis::RegisterCachePolicy::Debug);
+
+        // camera.set_string("DeviceScanType", "Areascan")?;
+        // camera.set_string("RegionSelector", "Scan3dExtraction1")?;
+        // dbg!(camera.dup_available_enumerations_as_display_names("ComponentSelector"));
+        // dbg!(camera.boolean("OnlyInScan3dRegionWithReflectance")?);
+        // dbg!(camera.is_feature_implemented("Array_Region_IsImplementedSwissKnife_"));
+
+        // camera.set_string("ComponentSelector", "Scatter")?;
 
         info!("Create Camera with features {:?}", features);
         let num_features = self.features.apply(&mut camera)?;
@@ -153,8 +167,10 @@ impl CameraBuilder {
                     continue;
                 }
             }
+
+            trace!("PayloadSize: {}", buf.data().1);
             match buf.payload_type() {
-                BufferPayloadType::Image | BufferPayloadType::Unknown => {
+                BufferPayloadType::Image | BufferPayloadType::Multipart => {
                     // match parser.string_value(&buf, "Counter0Value") {
                     //     Ok(o) => debug!("Found int value: {o}"),
                     //     Err(e) => error!("Counter not available: {e:?}"),
@@ -199,88 +215,84 @@ impl CameraBuilder {
             stream.push_buffer(buf);
 
             let image_buf = convert_buf.buffer();
-            let part_len = image_buf.n_parts();
-            anyhow::ensure!(part_len > 0, "Expected at least one image part");
-
+            let nparts = image_buf.n_parts();
+            anyhow::ensure!(nparts > 0, "Expected at least one image part");
+            trace!("Got buffer with {nparts} parts");
             // Collect others into vecs, use the buffer only for main-image for now (to be optimized)
-            let others = (1..image_buf.n_parts())
-                .map(|part_id| {
-                    // Todo: Get From params
-                    let key = ImageKey::try_from(Cow::Owned(format!("test_{part_id}"))).unwrap();
-                    let pixel_format = image_buf.part_pixel_format(part_id);
-                    let image = match pixel_format.raw() {
-                        aravis_sys::ARV_PIXEL_FORMAT_MONO_8 => (part_id, image_buf)
-                            .try_into_pilatus()
-                            .map(pilatus_engineering::image::DynamicImage::Luma8),
-
-                        aravis_sys::ARV_PIXEL_FORMAT_MONO_16 | crate::PIXELFORMAT_COORD3D_C16 => {
-                            (part_id, image_buf)
-                                .try_into_pilatus()
-                                .map(pilatus_engineering::image::DynamicImage::Luma16)
+            let mut iter = (0..nparts)
+                .filter(|part_id| {
+                    let ptype = image_buf.part_data_type(*part_id);
+                    match ptype {
+                        BufferPartDataType::ChunkData
+                        | BufferPartDataType::ConfidenceMap
+                        | BufferPartDataType::DeviceSpecific
+                        | BufferPartDataType::Jpeg
+                        | BufferPartDataType::Jpeg2000
+                        | BufferPartDataType::Unknown => {
+                            trace!("Ignore {ptype:?}");
+                            false
                         }
-
-                        _ => Err(crate::ToPilatusImageError::InvalidPixelType {
-                            format: pixel_format,
-                            details: "Unknown bit dept".into(),
-                        }),
-                    };
-                    (key, image)
-                })
-                .collect::<Vec<_>>();
-
-            let pixel_format = convert_buf.buffer().image_pixel_format();
-            trace!("{elapsed:?} {pixel_format:?}");
-
-            let pilatus_image = match pixel_format.raw() {
-                aravis_sys::ARV_PIXEL_FORMAT_MONO_8 => convert_buf
-                    .try_into_pilatus()
-                    .map(pilatus_engineering::image::DynamicImage::Luma8),
-
-                aravis_sys::ARV_PIXEL_FORMAT_MONO_16 | crate::PIXELFORMAT_COORD3D_C16 => {
-                    convert_buf
-                        .try_into_pilatus()
-                        .map(pilatus_engineering::image::DynamicImage::Luma16)
-                }
-
-                _ => {
-                    return Err(crate::ToPilatusImageError::InvalidPixelType {
-                        format: pixel_format,
-                        details: "Unknown bit dept".into(),
+                        _ => true,
                     }
-                    .into())
-                }
-            }; /*
-               if let Ok(x) = pilatus_image.as_ref() {
-                   let clone = x.clone();
-                   std::thread::spawn(move || match clone {
-                       pilatus_engineering::image::DynamicImage::Luma8(img) => println!("I8image"),
-                       pilatus_engineering::image::DynamicImage::Luma16(img) => {
-                           let mut file = std::fs::File::create(format!(
-                               "{}.png",
-                               (std::time::SystemTime::now()
-                                   .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                                   .unwrap()
-                                   .as_millis())
-                           ))
-                           .unwrap();
-                           let encoder = image::codecs::png::PngEncoder::new(file);
-                           let (width, height) = img.dimensions();
-                           let slice = unsafe {
-                               let len = img.buffer().len();
-                               std::slice::from_raw_parts(img.buffer().as_ptr().cast::<u8>(), 2 * len)
-                           };
-                           encoder
-                               .write_image(
-                                   slice,
-                                   width.get() as _,
-                                   height.get() as _,
-                                   image::ExtendedColorType::L16,
-                               )
-                               .unwrap();
-                       }
-                       _ => todo!(),
-                   });
-               }*/
+                })
+                .map(|part_id| {
+                    try_into_dynamic_pilatus_image(part_id, convert_buf.clone())
+                        .map(|image| (part_id, image))
+                        .with_context(|| format!("Cannot create part {part_id} of {nparts}"))
+                });
+
+            let Some(pilatus_image) = iter.next() else {
+                warn!("No image found");
+                convert_buf.release();
+                continue;
+            };
+            let pilatus_image = pilatus_image?.1;
+            let others = iter
+                .map(|data| {
+                    let (part_id, image) = data?;
+                    let component_id = image_buf.part_component_id(part_id);
+
+                    anyhow::Ok((
+                        SpecificImageKey::try_from(Cow::Owned(format!(
+                            "component{component_id}part{part_id}"
+                        )))
+                        .unwrap(),
+                        image,
+                    ))
+                })
+                .collect::<Result<HashMap<_, _>, _>>()?;
+            /*
+            if let Ok(x) = pilatus_image.as_ref() {
+                let clone = x.clone();
+                std::thread::spawn(move || match clone {
+                    pilatus_engineering::image::DynamicImage::Luma8(img) => println!("I8image"),
+                    pilatus_engineering::image::DynamicImage::Luma16(img) => {
+                        let mut file = std::fs::File::create(format!(
+                            "{}.png",
+                            (std::time::SystemTime::now()
+                                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                                .unwrap()
+                                .as_millis())
+                        ))
+                        .unwrap();
+                        let encoder = image::codecs::png::PngEncoder::new(file);
+                        let (width, height) = img.dimensions();
+                        let slice = unsafe {
+                            let len = img.buffer().len();
+                            std::slice::from_raw_parts(img.buffer().as_ptr().cast::<u8>(), 2 * len)
+                        };
+                        encoder
+                            .write_image(
+                                slice,
+                                width.get() as _,
+                                height.get() as _,
+                                image::ExtendedColorType::L16,
+                            )
+                            .unwrap();
+                    }
+                    _ => todo!(),
+                });
+            }*/
 
             // let (ptr, len) = buf.data();
             // let width = buf.image_width() as u32;
@@ -291,15 +303,11 @@ impl CameraBuilder {
             // let pilatus_image =
             //     anyhow::Ok(LumaImage::new(vec, width.try_into()?, height.try_into()?));
 
-            let mut result = ImageWithMeta::with_meta_and_others(
-                pilatus_image?,
+            let result = ImageWithMeta::with_meta_and_others(
+                pilatus_image,
                 ImageMeta { hash: None },
-                Default::default(),
+                others,
             );
-
-            for (k, v) in others {
-                result.insert(k, v?);
-            }
 
             match (callback)(result) {
                 StreamingAction::Continue => {}

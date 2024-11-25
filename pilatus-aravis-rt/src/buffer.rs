@@ -1,6 +1,7 @@
 use aravis::glib::object::ObjectExt;
 use futures::channel::mpsc::Sender;
 
+#[derive(Clone)]
 pub(crate) struct ReturnableBuffer {
     buf: aravis::Buffer,
     ch: Sender<Box<Self>>,

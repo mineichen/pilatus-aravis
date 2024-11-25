@@ -116,7 +116,7 @@ impl super::State {
                         }
                         Ok(StreamingAction::Continue) => {}
                         Err(e) => {
-                            debug!("Error during acquisition: {e:?}");
+                            warn!("Error during acquisition: {e:?}");
 
                             if should_terminate_copy.load(Ordering::Relaxed) {
                                 break;
