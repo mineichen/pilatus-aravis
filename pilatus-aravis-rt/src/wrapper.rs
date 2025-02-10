@@ -1,9 +1,9 @@
 use std::{
     borrow::Cow,
-    collections::HashMap,
+    collections::{btree_map::Entry, BTreeMap, HashMap},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, LazyLock,
     },
 };
 
@@ -23,7 +23,11 @@ use crate::{
 
 pub(super) fn register_services(c: &mut ServiceCollection) {
     c.register_shared(|| {
-        Arc::new(aravis::Aravis::initialize().expect("Noone else is allowed to initialize"))
+        static INSTANCE: LazyLock<Arc<Aravis>> = std::sync::LazyLock::new(|| {
+            Arc::new(aravis::Aravis::initialize().expect("Noone else is allowed to initialize"))
+        });
+
+        INSTANCE.clone()
     });
     c.with::<Registered<Arc<Aravis>>>()
         .register(|ctx| CameraFactory { ctx });
@@ -140,7 +144,7 @@ impl CameraBuilder {
             }
             let Some(mut buf) = stream.timeout_pop_buffer(5_100_000) else {
                 if let Ok(x) = camera.string("DeviceSerialNumber") {
-                    debug!("No images but still able to get serial number {x}. Avoid reconnect");
+                    debug!("No images but still able to get serial number {x}. Avoid reconnect. If stream stopped unexpectedly, try to reduce the Bandwidth (FrameRate, enable JumboFrames...): {:?}", StructuredStatistics::new(&stream));
                     continue;
                 }
                 return Err(anyhow!(
@@ -148,7 +152,7 @@ impl CameraBuilder {
                     last.elapsed()
                 ));
             };
-            trace!("After pop_buffer");
+            trace!("After pop_buffer: {:?}", StructuredStatistics::new(&stream));
 
             let elapsed = last.elapsed();
             last = std::time::Instant::now();
@@ -219,7 +223,8 @@ impl CameraBuilder {
             anyhow::ensure!(nparts > 0, "Expected at least one image part");
             trace!("Got buffer with {nparts} parts");
             // Collect others into vecs, use the buffer only for main-image for now (to be optimized)
-            let mut iter = (0..nparts)
+
+            let iter = (0..nparts)
                 .filter(|part_id| {
                     let ptype = image_buf.part_data_type(*part_id);
                     match ptype {
@@ -237,26 +242,52 @@ impl CameraBuilder {
                 })
                 .map(|part_id| {
                     try_into_dynamic_pilatus_image(part_id, convert_buf.clone())
-                        .map(|image| (part_id, image))
+                        .map(|image| (part_id, image_buf.part_component_id(part_id), image))
                         .with_context(|| format!("Cannot create part {part_id} of {nparts}"))
                 });
+            let mut first_component_id = None;
+            let component_map = {
+                let mut component_map = BTreeMap::new();
+                for data in iter {
+                    let (part_id, component_id, image) = data?;
+                    first_component_id.get_or_insert(component_id);
+                    match component_map.entry(component_id) {
+                        Entry::Vacant(vacant_entry) => {
+                            vacant_entry.insert(vec![(part_id, image)]);
+                        }
+                        Entry::Occupied(mut occupied_entry) => {
+                            occupied_entry.get_mut().push((part_id, image));
+                        }
+                    }
+                }
+                component_map
+            };
+            let mut component_images: HashMap<_, _> = component_map
+                .into_iter()
+                .filter_map(|(component_id, mut parts)| match parts.len() {
+                    1 => Some((component_id, parts.pop().unwrap().1)),
+                    3 => {
+                        warn!("Currently only returns Red layer");
+                        Some((component_id, parts.pop().unwrap().1))
+                    }
+                    _ => None,
+                })
+                .collect();
 
-            let Some(pilatus_image) = iter.next() else {
+            let Some((_main_conponent_id, pilatus_image)) =
+                first_component_id.and_then(|id| component_images.remove(&id).map(|img| (id, img)))
+            else {
                 warn!("No image found");
                 convert_buf.release();
                 continue;
             };
-            let pilatus_image = pilatus_image?.1;
-            let others = iter
-                .map(|data| {
-                    let (part_id, image) = data?;
-                    let component_id = image_buf.part_component_id(part_id);
 
+            let others = component_images
+                .into_iter()
+                .map(|(component_id, image)| {
                     anyhow::Ok((
-                        SpecificImageKey::try_from(Cow::Owned(format!(
-                            "component{component_id}part{part_id}"
-                        )))
-                        .unwrap(),
+                        SpecificImageKey::try_from(Cow::Owned(format!("component{component_id}")))
+                            .unwrap(),
                         image,
                     ))
                 })
@@ -317,6 +348,25 @@ impl CameraBuilder {
 
         debug!("Running out of buffers?");
         Ok(StreamingAction::Stop)
+    }
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+struct StructuredStatistics {
+    n_completed_buffers: u64,
+    n_failures: u64,
+    n_underruns: u64,
+}
+
+impl StructuredStatistics {
+    fn new(stream: &aravis::Stream) -> Self {
+        let (n_completed_buffers, n_failures, n_underruns) = stream.statistics();
+        Self {
+            n_completed_buffers,
+            n_failures,
+            n_underruns,
+        }
     }
 }
 

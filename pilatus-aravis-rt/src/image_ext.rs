@@ -1,6 +1,9 @@
 use std::{num::NonZeroU32, sync::Arc};
 
-use aravis::{glib::translate::ToGlibPtr, BufferPayloadType};
+use aravis::{
+    glib::{object::ObjectExt, translate::ToGlibPtr},
+    BufferPayloadType,
+};
 use pilatus_engineering::image::{DynamicImage, GenericImage, ImageVtable};
 use tracing::debug;
 
@@ -39,7 +42,22 @@ unsafe extern "C" fn make_mut<T: Clone, const CHANNELS: usize>(
     out_len: &mut usize,
 ) -> *mut T {
     *out_len = image.len();
-    image.ptr as *mut T
+    let buf = unsafe { &*(image.data as *mut ReturnableBuffer) }
+        .buffer()
+        .ref_count();
+    let refcount = buf;
+    if refcount == 1 {
+        image.ptr as *mut T
+    } else {
+        let mut arc_image = Arc::from(image.buffer());
+        let (width, height) = image.dimensions();
+        let ptr = Arc::get_mut(&mut arc_image).unwrap();
+        let ptr = (ptr as *mut [T]).cast();
+
+        let mut new_image = GenericImage::<T, CHANNELS>::new_arc(arc_image, width, height);
+        std::mem::swap(image, &mut new_image);
+        ptr
+    }
 }
 
 impl<T: 'static + Clone, const CHANNELS: usize> Factory<T, CHANNELS> for Box<ReturnableBuffer> {
@@ -188,5 +206,20 @@ pub fn part_data(buf: &aravis::Buffer, part_id: u32) -> (*mut u8, usize) {
             &mut size as *mut usize,
         );
         (data, size)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+
+    #[test]
+    fn miri_get_mut_on_cloned() {
+        let buffer = aravis::Buffer::new_allocate(10000);
+        aravis::FakeCamera::new("serial_number").fill_buffer(&buffer);
+        let (sender, recv) = futures::channel::mpsc::channel(10);
+        let returnable = Box::new(ReturnableBuffer::new(buffer, sender));
+        let image = (0, returnable).try_into_pilatus::<u8, 1>().unwrap();
     }
 }
