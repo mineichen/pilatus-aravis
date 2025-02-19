@@ -13,6 +13,7 @@ fn main() {
         .register(pilatus_engineering_rt::register)
         .register(pilatus_axum_rt::register)
         .register(pilatus_aravis_rt::register)
+        .register(pilatus_engineering_camera_rt::register)
         .register(register)
         .run();
 }

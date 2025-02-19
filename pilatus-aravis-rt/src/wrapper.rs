@@ -1,10 +1,8 @@
 use std::{
-    borrow::Cow,
-    collections::{btree_map::Entry, BTreeMap, HashMap},
-    sync::{
+    borrow::Cow, collections::{btree_map::Entry, BTreeMap, HashMap}, mem::MaybeUninit, sync::{
         atomic::{AtomicBool, Ordering},
         Arc, LazyLock,
-    },
+    }
 };
 
 use anyhow::{anyhow, Context};
@@ -14,7 +12,7 @@ use aravis::{
 };
 use futures::stream::FusedStream;
 use minfac::{Registered, ServiceCollection};
-use pilatus_engineering::image::{ImageMeta, ImageWithMeta, SpecificImageKey};
+use pilatus_engineering::image::{DynamicImage, GenericImage, ImageMeta, ImageWithMeta, SpecificImageKey};
 use tracing::{debug, info, trace, warn};
 
 use crate::{
@@ -22,7 +20,7 @@ use crate::{
 };
 
 pub(super) fn register_services(c: &mut ServiceCollection) {
-    c.register_shared(|| {
+    c.register(|| {
         static INSTANCE: LazyLock<Arc<Aravis>> = std::sync::LazyLock::new(|| {
             Arc::new(aravis::Aravis::initialize().expect("Noone else is allowed to initialize"))
         });
@@ -64,7 +62,7 @@ impl CameraFactory {
     #[cfg(test)]
     pub fn build(
         &self,
-        callback: impl FnMut(ImageWithMeta<pilatus_engineering::image::DynamicImage>) -> StreamingAction,
+        callback: impl FnMut(ImageWithMeta<DynamicImage>) -> StreamingAction,
     ) -> anyhow::Result<StreamingAction> {
         CameraBuilder {
             camera_identifier: None,
@@ -87,7 +85,7 @@ impl CameraBuilder {
     pub fn build(
         self,
         mut callback: impl FnMut(
-            ImageWithMeta<pilatus_engineering::image::DynamicImage>,
+            ImageWithMeta<DynamicImage>,
         ) -> StreamingAction,
     ) -> anyhow::Result<StreamingAction> {
         let mut camera = aravis::Camera::new(self.camera_identifier.as_deref())?;
@@ -264,13 +262,52 @@ impl CameraBuilder {
             };
             let mut component_images: HashMap<_, _> = component_map
                 .into_iter()
-                .filter_map(|(component_id, mut parts)| match parts.len() {
-                    1 => Some((component_id, parts.pop().unwrap().1)),
-                    3 => {
-                        warn!("Currently only returns Red layer");
-                        Some((component_id, parts.pop().unwrap().1))
+                .filter_map(|(component_id, parts)| {
+                    let mut iter = parts.into_iter().fuse();
+                    match (iter.next(), iter.next(), iter.next(), iter.next()) {
+                        (Some(x), None, None, None) => Some((component_id, x.1)),
+                        (Some(r), Some(g), Some(b), None) => {
+                            let (width, height) = r.1.dimensions();
+                            if r.1.dimensions() != g.1.dimensions() || r.1.dimensions() != b.1.dimensions() {
+                                warn!("Got Image with different sizes. Component '{component_id}' will be ignored");
+                                return None;
+                            }
+                            let len = (width.get() * height.get()) as usize;
+                            match (r.1, g.1, b.1) {
+                                (DynamicImage::Luma8(r), DynamicImage::Luma8(g), DynamicImage::Luma8(b)) => {
+                                    assert_eq!(r.buffer().len(),g.buffer().len());
+                                    assert_eq!(r.buffer().len(),b.buffer().len());
+                                    
+                                    let buf = unsafe {
+                                        let mut buf: Arc<[MaybeUninit<u8>]> = Arc::new_uninit_slice((len * 3) as usize);
+                                        let mut_slice = Arc::get_mut(&mut buf).expect("Just created");
+                                        std::ptr::copy_nonoverlapping(r.buffer().as_ptr(), mut_slice[0].as_mut_ptr(), len);
+                                        std::ptr::copy_nonoverlapping(g.buffer().as_ptr(), mut_slice[len].as_mut_ptr(), len);
+                                        std::ptr::copy_nonoverlapping(b.buffer().as_ptr(), mut_slice[len*2].as_mut_ptr(), len);
+                                        buf.assume_init()
+                                    };
+                                    let img = GenericImage::<u8, 3>::new_arc(buf, width, height);
+                                    Some((component_id, DynamicImage::Rgb8Planar(img)))
+                                },
+                                x => {
+                                    warn!("Only 3xLuma8 can be combined. Got {x:?}");
+                                    None
+                                },
+                            }
+                            
+                            
+                        }
+                        (a, b, c, d) => {
+                            warn!(
+                                "Expected either 1 or three, got {} {} {} {}",
+                                a.is_some(),
+                                b.is_some(),
+                                c.is_some(),
+                                d.is_some()
+                            );
+                            None
+                        }
                     }
-                    _ => None,
                 })
                 .collect();
 
