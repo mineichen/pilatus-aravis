@@ -1,9 +1,9 @@
 use pilatus::SubscribeMessage;
 
-pub type SubscribeRunningStateMessage = SubscribeMessage<(), RunningState, ()>;
+pub type SubscribeRunningStateMessage = SubscribeMessage<(), CameraStatus, ()>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RunningState {
+pub enum CameraStatus {
     NotConnected,
     Error,
     Running,

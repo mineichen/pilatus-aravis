@@ -9,6 +9,7 @@ use std::{
 
 use futures::{Stream, StreamExt, TryStreamExt};
 use pilatus::{device::ActorResult, MissedItemsError};
+use pilatus_aravis::CameraStatus;
 use pilatus_engineering::image::{
     BroadcastImage, DynamicImage, ImageWithMeta, SubscribeDynamicImageMessage,
     SubscribeImageMessage,
@@ -73,14 +74,28 @@ impl super::State {
 
         debug!("Start new Image stream with aravis");
         let (sender, receiver) = broadcast::channel(1);
-        let builder = self
-            .factory
-            .create_builder(self.params.identifier.clone())
-            .with_features(self.params.features.clone());
+        let features = self.params.features.clone();
+        let connect_state_sender = self.state.clone();
+        let mut first_connection_attempt = true;
+
         let broadcast = sender.clone();
         let should_terminate = Arc::new(AtomicBool::new(false));
         let should_terminate_copy = should_terminate.clone();
         let (async_term_send, async_thread_termination) = futures::channel::oneshot::channel();
+
+        let mut runner = self
+            .factory
+            .create_runner(self.params.identifier.clone())
+            .with_termination(should_terminate_copy.clone())
+            .on_connect(move |camera| {
+                let num_features = features.apply(camera)?;
+                debug!("Camera is created with {num_features} features");
+                if first_connection_attempt {
+                    connect_state_sender.publish_if_changed(CameraStatus::Running);
+                    first_connection_attempt = false;
+                }
+                Ok(())
+            });
 
         let state_sender = self.state.clone();
         self.acquisition = Some(RunningState {
@@ -89,24 +104,19 @@ impl super::State {
             async_thread_termination,
             thread_handle: std::thread::spawn(move || {
                 loop {
-                    let r = builder
-                        .clone()
-                        .with_termination(should_terminate_copy.clone())
-                        .build(|img| {
-                            sender
-                                .send(img)
-                                .map(|x| {
-                                    if x > 0 {
-                                        state_sender.publish_if_changed(
-                                            pilatus_aravis::RunningState::Running,
-                                        );
-                                        StreamingAction::Continue
-                                    } else {
-                                        StreamingAction::Stop
-                                    }
-                                })
-                                .unwrap_or(StreamingAction::Stop)
-                        });
+                    let r = runner.run(|img| {
+                        sender
+                            .send(img)
+                            .map(|number_of_receivers| {
+                                if number_of_receivers > 0 {
+                                    state_sender.publish_if_changed(CameraStatus::Running);
+                                    StreamingAction::Continue
+                                } else {
+                                    StreamingAction::Stop
+                                }
+                            })
+                            .unwrap_or(StreamingAction::Stop)
+                    });
 
                     match r {
                         Ok(StreamingAction::Stop) => {
@@ -121,14 +131,13 @@ impl super::State {
                             if should_terminate_copy.load(Ordering::Relaxed) {
                                 break;
                             } else {
-                                state_sender
-                                    .publish_if_changed(pilatus_aravis::RunningState::Error);
+                                state_sender.publish_if_changed(CameraStatus::Error);
                                 std::thread::sleep(Duration::from_secs(1))
                             }
                         }
                     }
                 }
-                state_sender.publish_if_changed(pilatus_aravis::RunningState::NotConnected);
+                state_sender.publish_if_changed(CameraStatus::NotConnected);
             }),
         });
         tokio_stream::wrappers::BroadcastStream::new(receiver).map_err(mapper)

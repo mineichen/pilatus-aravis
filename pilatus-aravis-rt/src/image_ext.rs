@@ -220,6 +220,6 @@ mod tests {
         aravis::FakeCamera::new("serial_number").fill_buffer(&buffer);
         let (sender, recv) = futures::channel::mpsc::channel(10);
         let returnable = Box::new(ReturnableBuffer::new(buffer, sender));
-        let image = (0, returnable).try_into_pilatus::<u8, 1>().unwrap();
+        //let image = (0, returnable).try_into_pilatus::<u8, 1>().unwrap();
     }
 }

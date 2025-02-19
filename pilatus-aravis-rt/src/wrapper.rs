@@ -36,10 +36,10 @@ pub struct CameraFactory {
     ctx: Arc<aravis::Aravis>,
 }
 
-#[derive(Clone)]
-pub struct CameraBuilder {
+//#[derive(Clone)]
+pub struct CameraRunner {
+    callback: Box<dyn FnMut(&mut aravis::Camera) -> anyhow::Result<()> + Send + Sync + 'static>,
     camera_identifier: Option<String>,
-    features: GenicamFeatureCollection,
     is_termination_requested: Arc<AtomicBool>,
 }
 
@@ -52,44 +52,47 @@ impl CameraFactory {
     pub fn get_device_list(&self) -> Vec<aravis::DeviceInfo> {
         self.ctx.get_device_list()
     }
-    pub fn create_builder(&self, camera_identifier: Option<String>) -> CameraBuilder {
-        CameraBuilder {
+    pub fn create_runner(&self, camera_identifier: Option<String>) -> CameraRunner {
+        CameraRunner {
+            callback: Box::new(|_| Ok(())),
             camera_identifier,
-            features: Default::default(),
             is_termination_requested: Arc::new(AtomicBool::new(false)),
         }
     }
     #[cfg(test)]
-    pub fn build(
+    pub fn run(
         &self,
         callback: impl FnMut(ImageWithMeta<DynamicImage>) -> StreamingAction,
     ) -> anyhow::Result<StreamingAction> {
-        CameraBuilder {
+        CameraRunner {
+            callback: Box::new(|_| Ok(())),
             camera_identifier: None,
-            features: Default::default(),
             is_termination_requested: Arc::new(AtomicBool::new(false)),
         }
-        .build(callback)
+        .run(callback)
     }
 }
 
-impl CameraBuilder {
-    pub fn with_features(mut self, features: GenicamFeatureCollection) -> Self {
-        self.features = features;
-        self
-    }
+impl CameraRunner {
     pub fn with_termination(mut self, is_termination_requested: Arc<AtomicBool>) -> Self {
         self.is_termination_requested = is_termination_requested;
         self
     }
-    pub fn build(
-        self,
+
+    pub fn on_connect(mut self, callback: impl FnMut(&mut aravis::Camera) -> anyhow::Result<()> + Send + Sync + 'static) -> Self {
+        self.callback = Box::new(callback);
+        self
+    }
+
+    pub fn run(
+        &mut self,
         mut callback: impl FnMut(
             ImageWithMeta<DynamicImage>,
         ) -> StreamingAction,
     ) -> anyhow::Result<StreamingAction> {
         let mut camera = aravis::Camera::new(self.camera_identifier.as_deref())?;
         let features = get_features(&camera)?.collect::<Vec<_>>();
+       
         // let (str, _size) = aravis::DeviceExt::genicam_xml(
         //     &camera
         //         .device()
@@ -117,10 +120,10 @@ impl CameraBuilder {
 
         // camera.set_string("ComponentSelector", "Scatter")?;
 
-        info!("Create Camera with features {:?}", features);
-        let num_features = self.features.apply(&mut camera)?;
-
-        debug!("Camera is created with {num_features} features");
+        trace!("Create Camera with features {:?}", features);
+        (self.callback)(&mut camera)?;
+        
+        
         camera.set_acquisition_mode(AcquisitionMode::Continuous)?;
         let stream = camera.create_stream()?;
 
@@ -426,7 +429,7 @@ mod tests {
         let mut ctr = 0;
         let producer_join = std::thread::spawn(move || {
             factory
-                .build(|img| {
+                .run(|img| {
                     ctr += 1;
                     if sender.try_send(img).is_err() {
                         return StreamingAction::Stop;

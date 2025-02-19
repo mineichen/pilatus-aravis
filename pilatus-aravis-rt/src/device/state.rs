@@ -1,7 +1,8 @@
 use futures::StreamExt;
 use pilatus::device::ActorResult;
-use pilatus_aravis::{RunningState, SubscribeRunningStateMessage};
+use pilatus_aravis::{CameraStatus, SubscribeRunningStateMessage};
 use tokio::sync::watch;
+use tracing::info;
 
 impl super::State {
     pub(super) async fn subscribe_state(
@@ -14,15 +15,16 @@ impl super::State {
 
 #[derive(Clone)]
 pub(super) struct State {
-    watch: watch::Sender<RunningState>,
+    watch: watch::Sender<CameraStatus>,
 }
 
 impl State {
-    pub(super) fn publish_if_changed(&self, new_state: RunningState) {
+    pub(super) fn publish_if_changed(&self, new_state: CameraStatus) {
         self.watch.send_if_modified(|cur| {
             if cur == &new_state {
                 false
             } else {
+                info!("Camera state changed to {new_state:?}");
                 *cur = new_state;
                 true
             }
@@ -32,7 +34,7 @@ impl State {
 
 impl Default for State {
     fn default() -> Self {
-        let (watch, _) = watch::channel(RunningState::NotConnected);
+        let (watch, _) = watch::channel(CameraStatus::NotConnected);
         Self { watch }
     }
 }
