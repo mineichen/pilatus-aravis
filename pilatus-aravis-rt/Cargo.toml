@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-aravis-sys = "0.10"
+aravis-sys = "0.11"
 aravis = { version = "0.11", features = ["v0_8_31"] }
 #aravis = { path = "../../aravis-rs/aravis" }
 #aravis-sys = { path = "../../aravis-rs/aravis-sys" }
@@ -12,7 +12,9 @@ anyhow = "1"
 futures = "0.3"
 image = { version = "0.25", default-features = false, features = ["png"] }
 minfac = "0.1.0"
-pilatus = { git = "https://github.com/mineichen/pilatus.git", branch = "main", features = ["tokio"] }
+pilatus = { git = "https://github.com/mineichen/pilatus.git", branch = "main", features = [
+    "tokio",
+] }
 pilatus-engineering = { git = "https://github.com/mineichen/pilatus.git", branch = "main" }
 pilatus-aravis = { path = "../pilatus-aravis" }
 serde = { "version" = "1", features = ["derive"] }
