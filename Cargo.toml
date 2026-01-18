@@ -7,6 +7,14 @@ members = [
   "pilatus-aravis-rt",
 ]
 
+[workspace.dependencies]
+pilatus.git = "https://github.com/mineichen/pilatus.git"
+pilatus-axum.git = "https://github.com/mineichen/pilatus.git"
+pilatus-axum-rt.git = "https://github.com/mineichen/pilatus.git"
+pilatus-engineering-rt = { git = "https://github.com/mineichen/pilatus.git", features = ["axum"]}
+pilatus-engineering.git = "https://github.com/mineichen/pilatus.git"
+pilatus-rt.git = "https://github.com/mineichen/pilatus.git"
+
 #[patch."https://github.com/mineichen/pilatus.git"]
 #pilatus =  { path = "../pilatus/pilatus" }
 #pilatus-rt =  { path = "../pilatus/pilatus-rt" }

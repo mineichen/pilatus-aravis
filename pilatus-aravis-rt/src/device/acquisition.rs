@@ -8,6 +8,7 @@ use std::{
 };
 
 use futures::{Stream, StreamExt, TryStreamExt};
+use imbuf::Image;
 use pilatus::{device::ActorResult, MissedItemsError};
 use pilatus_aravis::CameraStatus;
 use pilatus_engineering::image::{
@@ -28,15 +29,15 @@ impl super::State {
         Ok(self
             .acquire_broadcast()
             .await
-            .map(|img| match img {
-                Ok(ImageWithMeta {
-                    image: pilatus_engineering::image::DynamicImage::Luma8(img),
-                    meta,
-                    ..
-                }) => Some(BroadcastImage::with_hash(Arc::new(img), meta.hash)),
-                e => {
-                    warn!("Camera produces images of a format which was not requested: {e:?}");
-                    None
+            .map(|img| {
+                let img = img.ok()?;
+                let hash = img.hash;
+                match Image::<u8, 1>::try_from(img.image) {
+                    Ok(luma) => Some(BroadcastImage::with_hash(luma, hash)),
+                    e => {
+                        warn!("Camera produces images of a format which was not requested: {e:?}");
+                        None
+                    }
                 }
             })
             .take_while(|x| std::future::ready(x.is_some()))
@@ -63,6 +64,7 @@ impl super::State {
             // Continues running until stopped or all receiver terminate
             // 1. Receiver was not stopped, as there was another receiver before. Otherwise shutdown anyway to make sure
             // 2. We did not actively shutdown stream
+            // 3. ABA-Problem is not possible, because this is the only MessageHandler adding subscriptions and only one Handler is running at a time
             if stream.broadcast.receiver_count() > 1 {
                 self.acquisition = Some(stream);
                 return tokio_stream::wrappers::BroadcastStream::new(r).map_err(mapper);
@@ -105,26 +107,19 @@ impl super::State {
             thread_handle: std::thread::spawn(move || {
                 loop {
                     let r = runner.run(|img| {
-                        sender
-                            .send(img)
-                            .map(|number_of_receivers| {
-                                if number_of_receivers > 0 {
-                                    state_sender.publish_if_changed(CameraStatus::Running);
-                                    StreamingAction::Continue
-                                } else {
-                                    StreamingAction::Stop
-                                }
-                            })
-                            .unwrap_or(StreamingAction::Stop)
+                        if sender.send(img).is_ok() {
+                            StreamingAction::Continue
+                        } else {
+                            StreamingAction::Stop
+                        }
                     });
 
                     match r {
-                        Ok(StreamingAction::Stop) => {
+                        Ok(()) => {
                             debug!("Camera finished streaming");
                             drop(async_term_send);
                             break;
                         }
-                        Ok(StreamingAction::Continue) => {}
                         Err(e) => {
                             warn!("Error during acquisition: {e:?}");
 

@@ -4,7 +4,7 @@ use aravis::{
     glib::{object::ObjectExt, translate::ToGlibPtr},
     BufferPayloadType,
 };
-use pilatus_engineering::image::{DynamicImage, GenericImage, ImageVtable};
+use imbuf::{DynamicImageChannel, ImageChannel, ImageChannelVTable, PixelType, UnsafeImageChannel};
 use tracing::debug;
 
 use crate::buffer::ReturnableBuffer;
@@ -19,57 +19,68 @@ pub enum ToPilatusImageError {
     InvalidSize { width: u32, height: u32 },
 }
 
-pub(crate) trait ToPilatusImageExt {
-    fn try_into_pilatus<T: Clone, const CHANNELS: usize>(
+pub(crate) trait ToImbufImageExt {
+    fn try_into_pilatus<T: PixelType + Clone>(
         self,
-    ) -> Result<GenericImage<T, CHANNELS>, ToPilatusImageError>;
+    ) -> Result<ImageChannel<T::Primitive>, ToPilatusImageError>;
 }
 
 // Workaroung inability to have static which uses Outer Generics
-trait Factory<T: 'static, const CHANNELS: usize> {
-    const VTABLE: &'static ImageVtable<T, CHANNELS>;
+trait Factory<T: 'static> {
+    const VTABLE: &'static ImageChannelVTable<T>;
 }
 
-extern "C" fn clone_arc<T: Clone, const CHANNELS: usize>(
-    image: &GenericImage<T, CHANNELS>,
-) -> GenericImage<T, CHANNELS> {
-    let (width, height) = image.dimensions();
-    GenericImage::new_arc(Arc::from(image.buffer()), width, height)
+extern "C" fn clone_returnable<T: Clone>(image: &UnsafeImageChannel<T>) -> UnsafeImageChannel<T> {
+    let returnable = unsafe { Box::from_raw(image.data as *mut ReturnableBuffer) };
+    let cloned_ptr = Box::into_raw(returnable.clone());
+    std::mem::forget(returnable);
+    unsafe {
+        UnsafeImageChannel::new_with_vtable(
+            image.ptr,
+            image.width,
+            image.height,
+            image.pixel_elements,
+            image.vtable,
+            cloned_ptr.cast(),
+        )
+    }
 }
 
-unsafe extern "C" fn make_mut<T: Clone, const CHANNELS: usize>(
-    image: &mut GenericImage<T, CHANNELS>,
-    out_len: &mut usize,
-) -> *mut T {
-    *out_len = image.len();
+unsafe extern "C" fn make_mut<T: Clone>(image: &mut UnsafeImageChannel<T>) {
+    //*out_len = image.len();
     let buf = unsafe { &*(image.data as *mut ReturnableBuffer) }
         .buffer()
         .ref_count();
     let refcount = buf;
-    if refcount == 1 {
-        image.ptr as *mut T
-    } else {
-        let mut arc_image = Arc::from(image.buffer());
-        let (width, height) = image.dimensions();
-        let ptr = Arc::get_mut(&mut arc_image).unwrap();
-        let ptr = (ptr as *mut [T]).cast();
-
-        let mut new_image = GenericImage::<T, CHANNELS>::new_arc(arc_image, width, height);
+    if refcount > 1 {
+        let slice = unsafe {
+            std::slice::from_raw_parts(
+                image.ptr,
+                image.width.get() as usize
+                    * image.height.get() as usize
+                    * image.pixel_elements.get() as usize,
+            )
+        };
+        let mut new_image = UnsafeImageChannel::<T>::new_arc(
+            Arc::from(slice),
+            image.width,
+            image.height,
+            image.pixel_elements,
+        );
         std::mem::swap(image, &mut new_image);
-        ptr
     }
 }
 
-impl<T: 'static + Clone, const CHANNELS: usize> Factory<T, CHANNELS> for Box<ReturnableBuffer> {
-    const VTABLE: &'static ImageVtable<T, CHANNELS> = {
-        extern "C" fn clear<T, const CHANNELS: usize>(img: &mut GenericImage<T, CHANNELS>) {
+impl<T: 'static + Clone> Factory<T> for Box<ReturnableBuffer> {
+    const VTABLE: &'static ImageChannelVTable<T> = {
+        extern "C" fn clear<T>(img: &mut UnsafeImageChannel<T>) {
             unsafe { Box::from_raw(img.data as *mut ReturnableBuffer) }.release();
         }
 
-        &ImageVtable {
+        &ImageChannelVTable {
             make_mut,
             drop: clear,
-            clone: clone_arc,
+            clone: clone_returnable,
         }
     };
 } /*
@@ -108,10 +119,10 @@ impl<T: 'static + Clone, const CHANNELS: usize> Factory<T, CHANNELS> for Box<Ret
   }
   */
 
-pub(crate) fn try_into_dynamic_pilatus_image(
+pub(crate) fn try_into_dynamic_pilatus_image_channel(
     part_id: u32,
     buffer: Box<ReturnableBuffer>,
-) -> Result<DynamicImage, ToPilatusImageError> {
+) -> Result<DynamicImageChannel, ToPilatusImageError> {
     let image_buf = buffer.buffer();
     let width = image_buf.part_width(part_id);
     let height = image_buf.part_height(part_id);
@@ -121,12 +132,8 @@ pub(crate) fn try_into_dynamic_pilatus_image(
     debug!("Rest size: {}", buffer_size - area * byte_dept);
 
     match byte_dept {
-        1 => (part_id, buffer)
-            .try_into_pilatus()
-            .map(pilatus_engineering::image::DynamicImage::Luma8),
-        2 => (part_id, buffer)
-            .try_into_pilatus()
-            .map(pilatus_engineering::image::DynamicImage::Luma16),
+        1 => (part_id, buffer).try_into_pilatus::<u8>().map(Into::into),
+        2 => (part_id, buffer).try_into_pilatus::<u16>().map(Into::into),
         _ => Err(crate::ToPilatusImageError::InvalidPixelType {
             details: format!(
                 "Unknown bit dept of PixelFormat {:?}. Area {area}, BufferSize: {buffer_size}",
@@ -137,10 +144,10 @@ pub(crate) fn try_into_dynamic_pilatus_image(
 }
 
 /// Buffer should be reusable without reallocation to vec
-impl<'a> ToPilatusImageExt for (u32, Box<ReturnableBuffer>) {
-    fn try_into_pilatus<T: Clone, const CHANNELS: usize>(
+impl<'a> ToImbufImageExt for (u32, Box<ReturnableBuffer>) {
+    fn try_into_pilatus<T: PixelType + Clone>(
         self,
-    ) -> Result<GenericImage<T, CHANNELS>, ToPilatusImageError> {
+    ) -> Result<ImageChannel<T::Primitive>, ToPilatusImageError> {
         let (idx, returnable_buffer) = self;
         let buffer = returnable_buffer.buffer();
         debug!(
@@ -160,14 +167,14 @@ impl<'a> ToPilatusImageExt for (u32, Box<ReturnableBuffer>) {
 
         assert!((x as *mut T).is_aligned());
         let (non_zero_width, non_zero_height) = check_dimensions::<T>(width, height, len)?;
-        let boxed = Box::into_raw(returnable_buffer) as usize;
+        let boxed = Box::into_raw(returnable_buffer);
         Ok(unsafe {
-            GenericImage::<T, CHANNELS>::new_with_vtable(
+            ImageChannel::<T::Primitive>::new_with_vtable(
                 x as _,
                 non_zero_width,
                 non_zero_height,
-                <Box<ReturnableBuffer> as Factory<T, CHANNELS>>::VTABLE,
-                boxed,
+                <Box<ReturnableBuffer> as Factory<T::Primitive>>::VTABLE,
+                boxed.cast(),
             )
         })
     }
@@ -215,11 +222,12 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses aravis FFI which Miri does not support")]
     fn miri_get_mut_on_cloned() {
         let buffer = aravis::Buffer::new_allocate(10000);
         aravis::FakeCamera::new("serial_number").fill_buffer(&buffer);
-        let (sender, recv) = futures::channel::mpsc::channel(10);
-        let returnable = Box::new(ReturnableBuffer::new(buffer, sender));
+        let (sender, _recv) = futures::channel::mpsc::channel(10);
+        let _returnable = Box::new(ReturnableBuffer::new(buffer, sender));
         //let image = (0, returnable).try_into_pilatus::<u8, 1>().unwrap();
     }
 }

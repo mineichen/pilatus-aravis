@@ -14,7 +14,7 @@ use crate::wrapper::CameraFactory;
 mod acquisition;
 mod state;
 
-const DEVICE_TYPE: &str = "pilatus-camera-aravis";
+pub(crate) const DEVICE_TYPE: &str = "pilatus-aravis";
 
 #[derive(Debug, Deserialize, Serialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -75,8 +75,9 @@ async fn device(
 impl State {
     async fn update_params(
         &mut self,
-        _msg: UpdateParamsMessage<Params>,
+        UpdateParamsMessage { params, .. }: UpdateParamsMessage<Params>,
     ) -> ActorResult<UpdateParamsMessage<Params>> {
+        self.params = params;
         Ok(())
     }
 }

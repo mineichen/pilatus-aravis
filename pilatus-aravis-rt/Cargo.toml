@@ -10,12 +10,14 @@ aravis = { version = "0.11", features = ["v0_8_31"] }
 #aravis-sys = { path = "../../aravis-rs/aravis-sys" }
 anyhow = "1"
 futures = "0.3"
-image = { version = "0.25", default-features = false, features = ["png"] }
 minfac = "0.1.0"
-pilatus = { git = "https://github.com/mineichen/pilatus.git", branch = "main", features = [
+imbuf = { git = "https://github.com/mineichen/imbuf.git" }
+pilatus = { git = "https://github.com/mineichen/pilatus.git", features = [
     "tokio",
+    "minfac"
 ] }
-pilatus-engineering = { git = "https://github.com/mineichen/pilatus.git", branch = "main" }
+pilatus-axum.workspace = true
+pilatus-engineering = { git = "https://github.com/mineichen/pilatus.git" }
 pilatus-aravis = { path = "../pilatus-aravis" }
 serde = { "version" = "1", features = ["derive"] }
 thiserror = "2"
@@ -24,5 +26,6 @@ tokio-stream = { "version" = "0.1", "features" = ["sync"] }
 tracing = "0.1"
 
 [dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
 tokio = { "version" = "1", "features" = ["sync", "macros", "fs"] }
 serde_json = "1"

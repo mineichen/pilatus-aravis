@@ -6,12 +6,11 @@ edition = "2021"
 [dependencies]
 futures = "0.3"
 minfac = "0.1"
-pilatus = { git = "https://github.com/mineichen/pilatus.git", branch = "main", features = ["tokio"] }
-pilatus-axum-rt = { git = "https://github.com/mineichen/pilatus.git", branch = "main", features = ["engineering"] }
-pilatus-engineering-rt = { git = "https://github.com/mineichen/pilatus.git", branch = "main" }
-pilatus-engineering-camera-rt = { git = "https://github.com/mineichen/pilatus.git", branch = "main" }
-pilatus-rt = { git = "https://github.com/mineichen/pilatus.git", branch = "main" }
+pilatus = { workspace = true, features = ["tokio"] }
+pilatus-axum-rt.workspace = true
+pilatus-engineering-rt = { workspace = true, features = ["axum"]}
+pilatus-rt.workspace = true
 pilatus-aravis-rt = { path = "../../pilatus-aravis-rt" }
 pilatus-aravis = { path = "../../pilatus-aravis" }
-tracing = "0.1"
 tokio = { version = "1" }
+tracing = "0.1"

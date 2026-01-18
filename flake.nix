@@ -19,7 +19,7 @@
         stableToolchain = with inputs.fenix.packages.${system}; combine [
           stable.toolchain
         ];
-        
+
         # Nightly toolchain for Miri
         nightlyToolchain = inputs.fenix.packages.${system}.latest.withComponents [
           "cargo"
@@ -27,19 +27,22 @@
           "rustfmt"
           "miri"
         ];
-        
+
         # Common build inputs
         commonBuildInputs = [
           pkgs.pkg-config
           pkgs.mold
           pkgs.bashInteractive
           pkgs.glib
-	  pkgs.aravis
-	  pkgs.openssl
+	      pkgs.aravis
+	      pkgs.openssl
           pkgs.gcc
           pkgs.binutils
         ];
-        
+
+        defaultLdLibraryPath = "${pkgs.openssl.out}/lib;${pkgs.aravis.lib}/lib;${pkgs.glib.out}/lib";
+        defaultPkgConfigPath = "${pkgs.openssl.dev}/lib/pkgconfig;${pkgs.glib.dev}/lib/pkgconfig";
+
         # Helper function to create shell scripts with error handling
         # Sets up common build environment (gcc, binutils, mold, pkg-config, openssl)
         # Note: PKG_CONFIG_PATH should be sufficient for openssl-sys to find OpenSSL
@@ -47,23 +50,23 @@
           toString (pkgs.writeShellScript name ''
             set -e
             export PATH="${pkgs.gcc}/bin:${pkgs.binutils}/bin:${pkgs.mold}/bin:${pkgs.pkg-config}/bin"
-            export LD_LIBRARY_PATH="${pkgs.openssl.out}/lib"
-            export PKG_CONFIG_PATH="${pkgs.openssl.dev}/lib/pkgconfig;${pkgs.glib.dev}/lib/pkgconfig"
+            export LD_LIBRARY_PATH="${defaultLdLibraryPath}"
+            export PKG_CONFIG_PATH="${defaultPkgConfigPath}"
             ${script}
           '');
-        
+
         # Pure package for miri-test (built in sandbox)
         miriTestPure = pkgs.writeShellApplication {
           name = "miri-test-pure";
           runtimeInputs = [
             nightlyToolchain
           ] ++ commonBuildInputs;
-          
+
           text = ''
             set -e
             # Additional environment setup (runtimeInputs handles PATH for binaries)
-            export LD_LIBRARY_PATH="${pkgs.openssl.out}/lib"
-            export PKG_CONFIG_PATH="${pkgs.openssl.dev}/lib/pkgconfig"
+            export LD_LIBRARY_PATH="${defaultLdLibraryPath}"
+            export PKG_CONFIG_PATH="${defaultPkgConfigPath}"
             # MIRI_SYSROOT needs to be writable - use a cache directory
             # cargo miri setup will create the sysroot here
             export MIRI_SYSROOT="''${MIRI_SYSROOT:-$HOME/.cache/miri}"
@@ -80,9 +83,9 @@
             pkgs.mdbook
           ];
 
-          LD_LIBRARY_PATH = "${pkgs.openssl.out}/lib;${pkgs.aravis.lib}/lib;${pkgs.glib.out}/lib";
-          PKG_CONFIG_PATH="${pkgs.openssl.dev}/lib/pkgconfig;${pkgs.glib.dev}/lib/pkgconfig";
-         
+          LD_LIBRARY_PATH = defaultLdLibraryPath;
+          PKG_CONFIG_PATH = defaultPkgConfigPath;
+
 	  shellHook = ''
             echo "===================================="
             echo " Welcome to the deterministic dev shell! "
@@ -105,7 +108,8 @@
             pkgs.cargo-udeps
           ] ++ commonBuildInputs;
 
-          LD_LIBRARY_PATH = "${pkgs.openssl.out}/lib";
+          LD_LIBRARY_PATH = defaultLdLibraryPath;
+          PKG_CONFIG_PATH = defaultPkgConfigPath;
 
           shellHook = ''
             echo "Miri dev shell (nightly)"

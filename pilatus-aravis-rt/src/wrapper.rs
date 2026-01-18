@@ -1,8 +1,10 @@
 use std::{
-    borrow::Cow, collections::{btree_map::Entry, BTreeMap, HashMap}, mem::MaybeUninit, sync::{
+    borrow::Cow,
+    collections::{btree_map::Entry, BTreeMap, HashMap},
+    sync::{
         atomic::{AtomicBool, Ordering},
         Arc, LazyLock,
-    }
+    },
 };
 
 use anyhow::{anyhow, Context};
@@ -12,12 +14,10 @@ use aravis::{
 };
 use futures::stream::FusedStream;
 use minfac::{Registered, ServiceCollection};
-use pilatus_engineering::image::{DynamicImage, GenericImage, ImageMeta, ImageWithMeta, SpecificImageKey};
+use pilatus_engineering::image::{DynamicImage, ImageMeta, ImageWithMeta, SpecificImageKey};
 use tracing::{debug, info, trace, warn};
 
-use crate::{
-    buffer::ReturnableBuffer, genicam::GenicamFeatureCollection, try_into_dynamic_pilatus_image,
-};
+use crate::{buffer::ReturnableBuffer, try_into_dynamic_pilatus_image_channel};
 
 pub(super) fn register_services(c: &mut ServiceCollection) {
     c.register(|| {
@@ -63,7 +63,7 @@ impl CameraFactory {
     pub fn run(
         &self,
         callback: impl FnMut(ImageWithMeta<DynamicImage>) -> StreamingAction,
-    ) -> anyhow::Result<StreamingAction> {
+    ) -> anyhow::Result<()> {
         CameraRunner {
             callback: Box::new(|_| Ok(())),
             camera_identifier: None,
@@ -79,20 +79,22 @@ impl CameraRunner {
         self
     }
 
-    pub fn on_connect(mut self, callback: impl FnMut(&mut aravis::Camera) -> anyhow::Result<()> + Send + Sync + 'static) -> Self {
+    pub fn on_connect(
+        mut self,
+        callback: impl FnMut(&mut aravis::Camera) -> anyhow::Result<()> + Send + Sync + 'static,
+    ) -> Self {
         self.callback = Box::new(callback);
         self
     }
 
     pub fn run(
         &mut self,
-        mut callback: impl FnMut(
-            ImageWithMeta<DynamicImage>,
-        ) -> StreamingAction,
-    ) -> anyhow::Result<StreamingAction> {
-        let mut camera = aravis::Camera::new(self.camera_identifier.as_deref())?;
+        mut callback: impl FnMut(ImageWithMeta<DynamicImage>) -> StreamingAction,
+    ) -> anyhow::Result<()> {
+        let mut camera = aravis::Camera::new(self.camera_identifier.as_deref())
+            .context("Establish connection")?;
         let features = get_features(&camera)?.collect::<Vec<_>>();
-       
+
         // let (str, _size) = aravis::DeviceExt::genicam_xml(
         //     &camera
         //         .device()
@@ -107,7 +109,7 @@ impl CameraRunner {
         // debug!("ChunkMode: {}", camera.chunk_mode()?);
 
         if self.is_termination_requested.load(Ordering::Relaxed) {
-            return Ok(StreamingAction::Stop);
+            return Ok(());
         }
         // camera.set_access_check_policy(aravis::AccessCheckPolicy::Disable);
         // camera.set_register_cache_policy(aravis::RegisterCachePolicy::Debug);
@@ -122,8 +124,7 @@ impl CameraRunner {
 
         trace!("Create Camera with features {:?}", features);
         (self.callback)(&mut camera)?;
-        
-        
+
         camera.set_acquisition_mode(AcquisitionMode::Continuous)?;
         let stream = camera.create_stream()?;
 
@@ -135,8 +136,7 @@ impl CameraRunner {
             stream.push_buffer(Buffer::new_allocate(size as _));
         }
 
-        camera.start_acquisition()?;
-
+        let camera = AcquiringCamera::new(camera)?;
         let mut last = std::time::Instant::now();
         loop {
             trace!("Before pop_buffer");
@@ -144,7 +144,7 @@ impl CameraRunner {
                 break;
             }
             let Some(mut buf) = stream.timeout_pop_buffer(5_100_000) else {
-                if let Ok(x) = camera.string("DeviceSerialNumber") {
+                if let Ok(x) = camera.0.string("DeviceSerialNumber") {
                     debug!("No images but still able to get serial number {x}. Avoid reconnect. If stream stopped unexpectedly, try to reduce the Bandwidth (FrameRate, enable JumboFrames...): {:?}", StructuredStatistics::new(&stream));
                     continue;
                 }
@@ -242,7 +242,7 @@ impl CameraRunner {
                     }
                 })
                 .map(|part_id| {
-                    try_into_dynamic_pilatus_image(part_id, convert_buf.clone())
+                    try_into_dynamic_pilatus_image_channel(part_id, convert_buf.clone())
                         .map(|image| (part_id, image_buf.part_component_id(part_id), image))
                         .with_context(|| format!("Cannot create part {part_id} of {nparts}"))
                 });
@@ -263,59 +263,19 @@ impl CameraRunner {
                 }
                 component_map
             };
+
             let mut component_images: HashMap<_, _> = component_map
                 .into_iter()
                 .filter_map(|(component_id, parts)| {
-                    let mut iter = parts.into_iter().fuse();
-                    match (iter.next(), iter.next(), iter.next(), iter.next()) {
-                        (Some(x), None, None, None) => Some((component_id, x.1)),
-                        (Some(r), Some(g), Some(b), None) => {
-                            let (width, height) = r.1.dimensions();
-                            if r.1.dimensions() != g.1.dimensions() || r.1.dimensions() != b.1.dimensions() {
-                                warn!("Got Image with different sizes. Component '{component_id}' will be ignored");
-                                return None;
-                            }
-                            let len = (width.get() * height.get()) as usize;
-                            match (r.1, g.1, b.1) {
-                                (DynamicImage::Luma8(r), DynamicImage::Luma8(g), DynamicImage::Luma8(b)) => {
-                                    assert_eq!(r.buffer().len(),g.buffer().len());
-                                    assert_eq!(r.buffer().len(),b.buffer().len());
-                                    
-                                    let buf = unsafe {
-                                        let mut buf: Arc<[MaybeUninit<u8>]> = Arc::new_uninit_slice((len * 3) as usize);
-                                        let mut_slice = Arc::get_mut(&mut buf).expect("Just created");
-                                        std::ptr::copy_nonoverlapping(r.buffer().as_ptr(), mut_slice[0].as_mut_ptr(), len);
-                                        std::ptr::copy_nonoverlapping(g.buffer().as_ptr(), mut_slice[len].as_mut_ptr(), len);
-                                        std::ptr::copy_nonoverlapping(b.buffer().as_ptr(), mut_slice[len*2].as_mut_ptr(), len);
-                                        buf.assume_init()
-                                    };
-                                    let img = GenericImage::<u8, 3>::new_arc(buf, width, height);
-                                    Some((component_id, DynamicImage::Rgb8Planar(img)))
-                                },
-                                x => {
-                                    warn!("Only 3xLuma8 can be combined. Got {x:?}");
-                                    None
-                                },
-                            }
-                            
-                            
-                        }
-                        (a, b, c, d) => {
-                            warn!(
-                                "Expected either 1 or three, got {} {} {} {}",
-                                a.is_some(),
-                                b.is_some(),
-                                c.is_some(),
-                                d.is_some()
-                            );
-                            None
-                        }
-                    }
+                    let mut iter = parts.into_iter().map(|(_, i)| i);
+                    let first = iter.next()?;
+                    Some((component_id, DynamicImage::from_channels(first, iter)))
                 })
                 .collect();
 
-            let Some((_main_conponent_id, pilatus_image)) =
-                first_component_id.and_then(|id| component_images.remove(&id).map(|img| (id, img)))
+            // Remove first, to use it as main image
+            let Some(pilatus_image) =
+                first_component_id.and_then(|id| component_images.remove(&id))
             else {
                 warn!("No image found");
                 convert_buf.release();
@@ -382,12 +342,30 @@ impl CameraRunner {
 
             match (callback)(result) {
                 StreamingAction::Continue => {}
-                StreamingAction::Stop => return Ok(StreamingAction::Stop),
+                StreamingAction::Stop => break,
             }
         }
 
-        debug!("Running out of buffers?");
-        Ok(StreamingAction::Stop)
+        Ok(())
+    }
+}
+
+struct AcquiringCamera(aravis::Camera);
+
+impl AcquiringCamera {
+    pub fn new(camera: aravis::Camera) -> anyhow::Result<Self> {
+        camera.start_acquisition()?;
+        Ok(Self(camera))
+    }
+}
+
+impl Drop for AcquiringCamera {
+    fn drop(&mut self) {
+        if let Err(e) = self.0.stop_acquisition() {
+            warn!("Error stopping acquisition: {e:?}");
+        } else {
+            debug!("Actuisition stopped");
+        }
     }
 }
 
@@ -416,6 +394,7 @@ mod tests {
 
     use futures::StreamExt;
     use image::Luma;
+    use imbuf::Image;
 
     #[tokio::test]
     #[ignore = "requires hardware"]
@@ -445,16 +424,11 @@ mod tests {
         tokio::fs::create_dir_all(path).await?;
         let mut consumer_joins = Vec::new();
         let mut stream = receiver.enumerate();
-        while let Some((
-            i,
-            ImageWithMeta {
-                image: pilatus_engineering::image::DynamicImage::Luma8(img),
-                ..
-            },
-        )) = stream.next().await
-        {
+        while let Some((i, ImageWithMeta { image, .. })) = stream.next().await {
             consumer_joins.push(std::thread::spawn(move || {
+                let img = Image::<u8, 1>::try_from(image).unwrap();
                 let (width, height) = img.dimensions();
+
                 let f = image::ImageBuffer::<Luma<u8>, _>::from_raw(
                     width.get(),
                     height.get(),
