@@ -24,7 +24,7 @@ pub(super) fn register_services(c: &mut ServiceCollection) {
 
 async fn change_camera_ip(
     Path(_identifier): Path<String>,
-    InjectRegistered(a): InjectRegistered<Arc<Aravis>>,
+    InjectRegistered(_a): InjectRegistered<Arc<Aravis>>,
 ) -> impl IntoResponse {
     //let device = aravis::Device::new(identifier.as_str()).unwrap();
 }

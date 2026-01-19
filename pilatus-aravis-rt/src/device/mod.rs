@@ -12,6 +12,7 @@ use tracing::debug;
 use crate::wrapper::CameraFactory;
 
 mod acquisition;
+mod get_image;
 mod state;
 
 pub(crate) const DEVICE_TYPE: &str = "pilatus-aravis";
@@ -53,6 +54,7 @@ async fn device(
         .add_handler(State::update_params)
         .add_handler(State::acquire_dynamic)
         .add_handler(State::acquire)
+        .add_handler(State::handle_get_image)
         .add_handler(State::subscribe_state);
 
     let list_factory = factory.clone();
