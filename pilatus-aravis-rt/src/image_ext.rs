@@ -127,7 +127,7 @@ pub(crate) fn try_into_dynamic_pilatus_image_channel(
     let width = image_buf.part_width(part_id);
     let height = image_buf.part_height(part_id);
     let area = width as usize * height as usize;
-    let (_, buffer_size) = part_data(&image_buf, part_id);
+    let (_, buffer_size) = part_data(image_buf, part_id);
     let byte_dept = buffer_size / area;
     debug!("Rest size: {}", buffer_size - area * byte_dept);
 
@@ -144,7 +144,7 @@ pub(crate) fn try_into_dynamic_pilatus_image_channel(
 }
 
 /// Buffer should be reusable without reallocation to vec
-impl<'a> ToImbufImageExt for (u32, Box<ReturnableBuffer>) {
+impl ToImbufImageExt for (u32, Box<ReturnableBuffer>) {
     fn try_into_pilatus<T: PixelType + Clone>(
         self,
     ) -> Result<ImageChannel<T::Primitive>, ToPilatusImageError> {
@@ -161,7 +161,7 @@ impl<'a> ToImbufImageExt for (u32, Box<ReturnableBuffer>) {
         ) {
             return Err(ToPilatusImageError::NotAnImage);
         }
-        let (x, len) = part_data(&buffer, idx);
+        let (x, len) = part_data(buffer, idx);
         let width = buffer.part_width(idx) as u32;
         let height = buffer.part_height(idx) as u32;
 

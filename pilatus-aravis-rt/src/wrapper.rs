@@ -38,6 +38,7 @@ pub struct CameraFactory {
 
 //#[derive(Clone)]
 pub struct CameraRunner {
+    #[allow(clippy::type_complexity)]
     callback: Box<dyn FnMut(&mut aravis::Camera) -> anyhow::Result<()> + Send + Sync + 'static>,
     camera_identifier: Option<String>,
     is_termination_requested: Arc<AtomicBool>,
@@ -206,8 +207,8 @@ impl CameraRunner {
                 }
             }
 
-            let mut convert_buf = match recv_buffer.try_next() {
-                Ok(Some(b)) => b,
+            let mut convert_buf = match recv_buffer.try_recv() {
+                Ok(b) => b,
                 _ => {
                     info!("No buffer in pool. Allocate new");
                     Box::new(ReturnableBuffer::new(
