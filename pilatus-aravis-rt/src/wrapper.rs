@@ -335,11 +335,8 @@ impl CameraRunner {
             // let pilatus_image =
             //     anyhow::Ok(LumaImage::new(vec, width.try_into()?, height.try_into()?));
 
-            let result = ImageWithMeta::with_meta_and_others(
-                pilatus_image,
-                ImageMeta { hash: None },
-                others,
-            );
+            let result =
+                ImageWithMeta::with_meta_and_others(pilatus_image, ImageMeta::default(), others);
 
             match (callback)(result) {
                 StreamingAction::Continue => {}

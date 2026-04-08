@@ -11,7 +11,7 @@ aravis = { version = "0.11", features = ["v0_8_31"] }
 anyhow = "1"
 futures = "0.3"
 minfac = "0.1.0"
-imbuf = { git = "https://github.com/mineichen/imbuf.git" }
+imbuf.workspace = true
 pilatus = { git = "https://github.com/mineichen/pilatus.git", features = [
     "tokio",
     "minfac"
