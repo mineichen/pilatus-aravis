@@ -14,6 +14,7 @@ pilatus-axum-rt.git = "https://github.com/mineichen/pilatus.git"
 pilatus-engineering-rt = { git = "https://github.com/mineichen/pilatus.git", features = ["axum"]}
 pilatus-engineering.git = "https://github.com/mineichen/pilatus.git"
 pilatus-rt.git = "https://github.com/mineichen/pilatus.git"
+imbuf = "0.3"
 
 #[patch."https://github.com/mineichen/pilatus.git"]
 #pilatus =  { path = "../pilatus/pilatus" }
@@ -22,3 +23,7 @@ pilatus-rt.git = "https://github.com/mineichen/pilatus.git"
 #pilatus-axum-rt =  { path = "../pilatus/pilatus-axum-rt" }
 #pilatus-engineering =  { path = "../pilatus/pilatus-engineering" }
 #pilatus-engineering-camera-rt = { path = "../pilatus/pilatus-engineering-camera-rt" }
+
+
+#[patch.crates-io]
+#imbuf.path = "../imbuf"
