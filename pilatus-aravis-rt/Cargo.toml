@@ -12,12 +12,9 @@ anyhow = "1"
 futures = "0.3"
 minfac = "0.1.0"
 imbuf.workspace = true
-pilatus = { git = "https://github.com/mineichen/pilatus.git", features = [
-    "tokio",
-    "minfac"
-] }
+pilatus = { workspace = true, features = ["tokio", "minfac"] }
 pilatus-axum.workspace = true
-pilatus-engineering = { git = "https://github.com/mineichen/pilatus.git" }
+pilatus-engineering.workspace = true
 pilatus-aravis = { path = "../pilatus-aravis" }
 serde = { "version" = "1", features = ["derive"] }
 thiserror = "2"

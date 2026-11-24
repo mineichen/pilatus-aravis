@@ -1,10 +1,13 @@
-use std::{num::NonZeroU32, sync::Arc};
+use std::num::NonZeroU32;
 
 use aravis::{
-    glib::{object::ObjectExt, translate::ToGlibPtr},
+    glib::translate::ToGlibPtr,
     BufferPayloadType,
 };
-use imbuf::{DynamicImageChannel, ImageChannel, ImageChannelVTable, PixelType, UnsafeImageChannel};
+use imbuf::{
+    DynamicImageChannel, DynamicImageChannelView, ImageChannel, ImageChannelVTable, PixelType,
+    PixelTypePrimitive,
+};
 use tracing::debug;
 
 use crate::buffer::ReturnableBuffer;
@@ -17,7 +20,8 @@ pub enum ToPilatusImageError {
     InvalidPixelType { details: String },
     #[error("Conversion failed: width {width}, height: {height}")]
     InvalidSize { width: u32, height: u32 },
-}
+    #[error("Unsupported PixelFormat {format}: {bits_per_pixel} bits per pixel is not a multiple of 8 (e.g. packed formats)")]
+    UnsupportedBitDepth { format: String, bits_per_pixel: u8 },}
 
 pub(crate) trait ToImbufImageExt {
     fn try_into_pilatus<T: PixelType + Clone>(
@@ -25,64 +29,60 @@ pub(crate) trait ToImbufImageExt {
     ) -> Result<ImageChannel<T::Primitive>, ToPilatusImageError>;
 }
 
-// Workaroung inability to have static which uses Outer Generics
+// Workaround inability to have static which uses Outer Generics
 trait Factory<T: 'static> {
-    const VTABLE: &'static ImageChannelVTable<T>;
+    const VTABLE: &'static ImageChannelVTable;
 }
 
-extern "C" fn clone_returnable<T: Clone>(image: &UnsafeImageChannel<T>) -> UnsafeImageChannel<T> {
-    let returnable = unsafe { Box::from_raw(image.data as *mut ReturnableBuffer) };
-    let cloned_ptr = Box::into_raw(returnable.clone());
-    std::mem::forget(returnable);
+unsafe extern "C-unwind" fn clone_returnable<'a>(
+    image: &DynamicImageChannelView<'a>,
+) -> DynamicImageChannelView<'a> {
+    let cloned_ptr =
+        unsafe { ReturnableBuffer::clone_raw(DynamicImageChannelView::raw_data(image)) };
     unsafe {
-        UnsafeImageChannel::new_with_vtable(
-            image.ptr,
-            image.width,
-            image.height,
-            image.pixel_elements,
-            image.vtable,
-            cloned_ptr.cast(),
+        DynamicImageChannelView::from_raw_parts(
+            DynamicImageChannelView::raw_ptr(image),
+            image.width(),
+            image.height(),
+            image.pixel_elements(),
+            DynamicImageChannelView::raw_vtable(image),
+            cloned_ptr,
         )
     }
 }
 
-unsafe extern "C" fn make_mut<T: Clone>(image: &mut UnsafeImageChannel<T>) {
-    //*out_len = image.len();
-    let buf = unsafe { &*(image.data as *mut ReturnableBuffer) }
-        .buffer()
-        .ref_count();
-    let refcount = buf;
-    if refcount > 1 {
-        let slice = unsafe {
-            std::slice::from_raw_parts(
-                image.ptr,
-                image.width.get() as usize
-                    * image.height.get() as usize
-                    * image.pixel_elements.get() as usize,
-            )
+/// Whether the buffer of the channel is also referenced by a clone of it
+unsafe fn is_shared(image: &DynamicImageChannelView<'_>) -> bool {
+    !unsafe { ReturnableBuffer::is_unique_raw(DynamicImageChannelView::raw_data(image)) }
+}
+
+unsafe extern "C-unwind" fn make_mut<T: PixelTypePrimitive>(
+    image: &mut DynamicImageChannelView<'_>,
+) {
+    if unsafe { is_shared(image) } {
+        let (width, height, pixel_elements) =
+            (image.width(), image.height(), image.pixel_elements());
+        // Assigning drops the previous channel, which releases its share of the buffer.
+        let copy = unsafe { image.buffer_flat_unchecked::<T>() }.to_vec();
+        *image = unsafe {
+            DynamicImageChannel::new_vec_flat_unchecked(copy, width, height, pixel_elements)
         };
-        let mut new_image = UnsafeImageChannel::<T>::new_arc(
-            Arc::from(slice),
-            image.width,
-            image.height,
-            image.pixel_elements,
-        );
-        std::mem::swap(image, &mut new_image);
     }
 }
 
-impl<T: 'static + Clone> Factory<T> for Box<ReturnableBuffer> {
-    const VTABLE: &'static ImageChannelVTable<T> = {
-        extern "C" fn clear<T>(img: &mut UnsafeImageChannel<T>) {
-            unsafe { Box::from_raw(img.data as *mut ReturnableBuffer) }.release();
-        }
+/// `make_mut` without copying: The buffer can only be mutated if no clone shares it
+unsafe extern "C-unwind" fn try_make_mut(image: &mut DynamicImageChannelView<'_>) -> bool {
+    !unsafe { is_shared(image) }
+}
 
-        &ImageChannelVTable {
-            make_mut,
-            drop: clear,
-            clone: clone_returnable,
-        }
-    };
+unsafe extern "C-unwind" fn clear(image: &mut DynamicImageChannelView<'_>) {
+    // The last clone returns the buffer to the pool
+    drop(unsafe { ReturnableBuffer::from_raw(DynamicImageChannelView::raw_data(image)) });
+}
+
+impl<T: PixelTypePrimitive> Factory<T> for ReturnableBuffer {
+    const VTABLE: &'static ImageChannelVTable =
+        &ImageChannelVTable::new::<T>(clone_returnable, make_mut::<T>, try_make_mut, clear);
 } /*
 
   impl ToPilatusImageExt for Box<ReturnableBuffer> {
@@ -121,30 +121,30 @@ impl<T: 'static + Clone> Factory<T> for Box<ReturnableBuffer> {
 
 pub(crate) fn try_into_dynamic_pilatus_image_channel(
     part_id: u32,
-    buffer: Box<ReturnableBuffer>,
+    buffer: ReturnableBuffer,
 ) -> Result<DynamicImageChannel, ToPilatusImageError> {
     let image_buf = buffer.buffer();
-    let width = image_buf.part_width(part_id);
-    let height = image_buf.part_height(part_id);
-    let area = width as usize * height as usize;
-    let (_, buffer_size) = part_data(image_buf, part_id);
-    let byte_dept = buffer_size / area;
-    debug!("Rest size: {}", buffer_size - area * byte_dept);
+    let format = image_buf.part_pixel_format(part_id);
+    // TODO: Support bit depths which aren't a multiple of 8 once imbuf supports them
+    let bits_per_pixel = aravis::bits_per_pixel(format);
+    if bits_per_pixel % 8 != 0 {
+        return Err(ToPilatusImageError::UnsupportedBitDepth {
+            format: format!("{format:?}"),
+            bits_per_pixel,
+        });
+    }
 
-    match byte_dept {
+    match bits_per_pixel / 8 {
         1 => (part_id, buffer).try_into_pilatus::<u8>().map(Into::into),
         2 => (part_id, buffer).try_into_pilatus::<u16>().map(Into::into),
-        _ => Err(crate::ToPilatusImageError::InvalidPixelType {
-            details: format!(
-                "Unknown bit dept of PixelFormat {:?}. Area {area}, BufferSize: {buffer_size}",
-                image_buf.part_pixel_format(part_id)
-            ),
+        byte_depth => Err(ToPilatusImageError::InvalidPixelType {
+            details: format!("Unsupported byte depth {byte_depth} of PixelFormat {format:?}"),
         }),
     }
 }
 
 /// Buffer should be reusable without reallocation to vec
-impl ToImbufImageExt for (u32, Box<ReturnableBuffer>) {
+impl ToImbufImageExt for (u32, ReturnableBuffer) {
     fn try_into_pilatus<T: PixelType + Clone>(
         self,
     ) -> Result<ImageChannel<T::Primitive>, ToPilatusImageError> {
@@ -165,16 +165,18 @@ impl ToImbufImageExt for (u32, Box<ReturnableBuffer>) {
         let width = buffer.part_width(idx) as u32;
         let height = buffer.part_height(idx) as u32;
 
-        assert!((x as *mut T).is_aligned());
+        assert!(
+            (x as *mut T).is_aligned(),
+            "aravis returned misaligned image data"
+        );
         let (non_zero_width, non_zero_height) = check_dimensions::<T>(width, height, len)?;
-        let boxed = Box::into_raw(returnable_buffer);
         Ok(unsafe {
             ImageChannel::<T::Primitive>::new_with_vtable(
                 x as _,
                 non_zero_width,
                 non_zero_height,
-                <Box<ReturnableBuffer> as Factory<T::Primitive>>::VTABLE,
-                boxed.cast(),
+                <ReturnableBuffer as Factory<T::Primitive>>::VTABLE,
+                returnable_buffer.into_raw(),
             )
         })
     }
@@ -185,6 +187,11 @@ fn check_dimensions<T>(
     height: u32,
     buf_size: usize,
 ) -> Result<(NonZeroU32, NonZeroU32), ToPilatusImageError> {
+    let invalid_size = || ToPilatusImageError::InvalidSize { width, height };
+    let non_zero_width = NonZeroU32::new(width).ok_or_else(invalid_size)?;
+    let non_zero_height = NonZeroU32::new(height).ok_or_else(invalid_size)?;
+
+    // Not zero, because width and height aren't
     let area = height as usize * width as usize;
     let pixel_size = buf_size / area;
 
@@ -197,10 +204,6 @@ fn check_dimensions<T>(
         });
     }
 
-    let non_zero_width = NonZeroU32::try_from(width)
-        .map_err(|_| ToPilatusImageError::InvalidSize { width, height })?;
-    let non_zero_height = NonZeroU32::try_from(height)
-        .map_err(|_| ToPilatusImageError::InvalidSize { width, height })?;
     Ok((non_zero_width, non_zero_height))
 }
 
@@ -223,11 +226,32 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore = "uses aravis FFI which Miri does not support")]
-    fn miri_get_mut_on_cloned() {
-        let buffer = aravis::Buffer::new_allocate(10000);
+    fn channel_borrows_aravis_buffer_and_returns_it_to_pool() {
+        // FakeCamera defaults to 512x512 Mono8
+        let buffer = aravis::Buffer::new_allocate(512 * 512);
         aravis::FakeCamera::new("serial_number").fill_buffer(&buffer);
-        let (sender, _recv) = futures::channel::mpsc::channel(10);
-        let _returnable = Box::new(ReturnableBuffer::new(buffer, sender));
-        //let image = (0, returnable).try_into_pilatus::<u8, 1>().unwrap();
+        let data_ptr = part_data(&buffer, 0).0.cast_const();
+        let (sender, mut pool) = futures::channel::mpsc::channel(10);
+        let returnable = ReturnableBuffer::new(buffer, sender);
+
+        let mut image = (0, returnable).try_into_pilatus::<u8>().unwrap();
+        assert_eq!(image.buffer().as_ptr(), data_ptr, "conversion must not copy");
+
+        let mut clone = image.clone();
+        assert_eq!(clone.buffer().as_ptr(), data_ptr, "clone must not copy");
+        assert!(clone.buffer_mut().is_none(), "shared buffer is not mutable");
+
+        let original = image.buffer().to_vec();
+        clone.make_mut()[0] = original[0].wrapping_add(1);
+        assert_ne!(clone.buffer().as_ptr(), data_ptr, "copy on write");
+        assert_eq!(image.buffer(), &original[..]);
+        assert!(pool.try_recv().is_err(), "buffer is still in use");
+
+        let unique_ptr = image.buffer_mut().map(|b| b.as_ptr());
+        assert_eq!(unique_ptr, Some(data_ptr), "unique buffer is mutable in place");
+
+        drop(image);
+        let returned = pool.try_recv().expect("buffer returned to pool");
+        assert_eq!(part_data(&returned, 0).0.cast_const(), data_ptr);
     }
 }

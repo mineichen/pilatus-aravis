@@ -8,13 +8,19 @@
       url = "github:nix-community/fenix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    devtools.url = "github:mineichen/nix-devtools";
   };
 
   outputs = inputs @ { flake-parts, ... }:
     flake-parts.lib.mkFlake { inherit inputs; } {
       systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
 
-      perSystem = { pkgs, system, ... }: let
+      perSystem = { system, ... }: let
+        pkgs = import inputs.nixpkgs {
+          inherit system;
+          config.allowUnfreePredicate = pkg: builtins.elem (inputs.nixpkgs.lib.getName pkg) [ "claude-code" ];
+        };
+
         # Stable toolchain for regular tests
         stableToolchain = with inputs.fenix.packages.${system}; combine [
           stable.toolchain
@@ -34,14 +40,42 @@
           pkgs.mold
           pkgs.bashInteractive
           pkgs.glib
-	      pkgs.aravis
-	      pkgs.openssl
+          pkgs.aravis
+          pkgs.openssl
           pkgs.gcc
           pkgs.binutils
         ];
 
-        defaultLdLibraryPath = "${pkgs.openssl.out}/lib;${pkgs.aravis.lib}/lib;${pkgs.glib.out}/lib";
-        defaultPkgConfigPath = "${pkgs.openssl.dev}/lib/pkgconfig;${pkgs.glib.dev}/lib/pkgconfig";
+        # Path lists are separated by ':' (not ';')
+        defaultLdLibraryPath = "${pkgs.openssl.out}/lib:${pkgs.aravis.lib}/lib:${pkgs.glib.out}/lib";
+        defaultPkgConfigPath = "${pkgs.openssl.dev}/lib/pkgconfig:${pkgs.aravis.dev}/lib/pkgconfig:${pkgs.glib.dev}/lib/pkgconfig";
+
+        # `nix run .#isolated -- ..` starts a sandbox, see isolated.nix of nix-devtools.
+        # `..` makes the parent the workspace, so the path-dependencies are available.
+        isolated = inputs.devtools.lib.isolated {
+          inherit pkgs inputs;
+          name = "pilatus-aravis-isolated-dev";
+          extraMounts = [ "../pilatus" "../imbuf" ];
+          packages = commonBuildInputs ++ [
+            stableToolchain
+            pkgs.busybox
+            pkgs.git
+            pkgs.ripgrep
+            pkgs.curl
+            pkgs.opencode
+            pkgs.mdbook
+          ];
+          claude.pluginDirs = [
+            (inputs.devtools.lib.claudeRustAnalyzer {
+              inherit pkgs;
+              rust-analyzer = stableToolchain;
+            })
+          ];
+          env = {
+            LD_LIBRARY_PATH = defaultLdLibraryPath;
+            PKG_CONFIG_PATH = defaultPkgConfigPath;
+          };
+        };
 
         # Helper function to create shell scripts with error handling
         # Sets up common build environment (gcc, binutils, mold, pkg-config, openssl)
@@ -151,6 +185,11 @@
             cd book
             mdbook build
           '';
+        };
+
+        apps.isolated = {
+          type = "app";
+          program = pkgs.lib.getExe isolated;
         };
       };
     };

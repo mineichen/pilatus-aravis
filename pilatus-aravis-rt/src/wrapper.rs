@@ -144,7 +144,7 @@ impl CameraRunner {
             if self.is_termination_requested.load(Ordering::Relaxed) {
                 break;
             }
-            let Some(mut buf) = stream.timeout_pop_buffer(5_100_000) else {
+            let Some(buf) = stream.timeout_pop_buffer(5_100_000) else {
                 if let Ok(x) = camera.0.string("DeviceSerialNumber") {
                     debug!("No images but still able to get serial number {x}. Avoid reconnect. If stream stopped unexpectedly, try to reduce the Bandwidth (FrameRate, enable JumboFrames...): {:?}", StructuredStatistics::new(&stream));
                     continue;
@@ -207,18 +207,15 @@ impl CameraRunner {
                 }
             }
 
-            let mut convert_buf = match recv_buffer.try_recv() {
+            let empty_buf = match recv_buffer.try_recv() {
                 Ok(b) => b,
                 _ => {
                     info!("No buffer in pool. Allocate new");
-                    Box::new(ReturnableBuffer::new(
-                        Buffer::new_allocate(size as _),
-                        send_buf_back.clone(),
-                    ))
+                    Buffer::new_allocate(size as _)
                 }
             };
-            convert_buf.swap_buf(&mut buf);
-            stream.push_buffer(buf);
+            stream.push_buffer(empty_buf);
+            let convert_buf = ReturnableBuffer::new(buf, send_buf_back.clone());
 
             let image_buf = convert_buf.buffer();
             let nparts = image_buf.n_parts();
@@ -264,6 +261,11 @@ impl CameraRunner {
                 }
                 component_map
             };
+            // Give up this reference right away, so the channels are the only owners of the buffer:
+            // - Without channels, the buffer is returned to the pool immediately
+            // - Otherwise, the last dropped channel returns it and mutable access isn't
+            //   prevented (which would copy) because of this reference
+            drop(convert_buf);
 
             let mut component_images: HashMap<_, _> = component_map
                 .into_iter()
@@ -279,7 +281,6 @@ impl CameraRunner {
                 first_component_id.and_then(|id| component_images.remove(&id))
             else {
                 warn!("No image found");
-                convert_buf.release();
                 continue;
             };
 
